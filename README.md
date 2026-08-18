@@ -78,9 +78,36 @@ func main() {
 }
 ```
 
+## Examples
+
+Runnable, end-to-end examples live in [`examples/`](./examples), demonstrating the same `User`-caching walkthrough
+against both backends:
+
+```bash
+cd examples
+
+# No infrastructure needed:
+make run-memstore
+
+# Needs a local Redis:
+docker run --rm -p 6379:6379 redis:7
+make run-redisstore
+```
+
+`examples` is its own Go module (own `go.mod`/`go.sum`, `replace`d to the local checkout) so trying things out —
+or adding a new example with its own dependencies — never touches the root module's dependency graph.
+
 ## Implementation Notes
 
 The backend is an interface, so any store — or a fake, for tests — can replace Redis or in-memory storage without touching call sites.
+
+### Adapting another cache library
+
+`Store` has four methods (`Get`/`Set`/`Delete`/`Exists`, all `[]byte`-in/`[]byte`-out). To back `Cache[T]` with any
+existing Go cache (an LRU, `ristretto`, `bigcache`, `patrickmn/go-cache`, …), write a small adapter type that
+implements `Store` by calling into that library — the same pattern `memstore` and `redisstore` already use. `Get`
+must return `ErrStoreMiss` (not the underlying library's own miss value) so `Cache[T]` recognizes it as a
+read-through miss.
 
 ## License
 
