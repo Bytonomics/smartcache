@@ -85,6 +85,7 @@ against both backends:
 
 ```bash
 cd examples
+make deps   # first time only — downloads examples' own dependencies
 
 # No infrastructure needed:
 make run-memstore
