@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -85,7 +84,7 @@ type Loader[T any] func(ctx context.Context) (*T, error)
 // cache is never set to a nil value.
 type Writer[T any] func(ctx context.Context) (*T, error)
 
-// Options configures a Cache[T].
+// Options is the resolved configuration for a Cache[T], produced by Register.
 type Options struct {
 	// Prefix namespaces keys: the stored key is Prefix + ":" + key (or just key
 	// when Prefix is empty).
@@ -104,38 +103,16 @@ type Options struct {
 	DisableSingleflight bool
 }
 
-// Cache is a generic, type-safe read-through / delete-on-write cache over a CacheStore.
+// Cache is a generic, type-safe read-through / delete-on-write cache over a
+// CacheStore. It is constructed only via Register on a Manager, never directly.
 type Cache[T any] struct {
-	store CacheStore
-	opts  Options
-	codec Codec
-	group *singleflight.Group
-}
-
-// New builds a Cache[T]. It panics with ErrPointerType if T is itself a
-// pointer type — that is a programming error (the wrong generic
-// instantiation at the call site), fixed by editing the code, not something
-// a caller should have to check at runtime. It returns ErrInvalidTTL if
-// opts.TTL <= 0 and opts.AllowInfinite is false.
-//
-// The T-is-a-pointer check costs one reflect.TypeFor call, paid once here at
-// construction — never per request.
-func New[T any](store CacheStore, opts Options) (*Cache[T], error) {
-	if t := reflect.TypeFor[T](); t.Kind() == reflect.Pointer {
-		panic(fmt.Errorf("smartcache.New[%s]: %w", t, ErrPointerType))
-	}
-	if opts.TTL <= 0 && !opts.AllowInfinite {
-		return nil, ErrInvalidTTL
-	}
-	codec := opts.Codec
-	if codec == nil {
-		codec = jsonCodec{}
-	}
-	var group *singleflight.Group
-	if !opts.DisableSingleflight {
-		group = &singleflight.Group{}
-	}
-	return &Cache[T]{store: store, opts: opts, codec: codec, group: group}, nil
+	store          CacheStore
+	batch          BatchCacheStore // non-nil only when store implements BatchCacheStore
+	opts           Options
+	codec          Codec
+	group          *singleflight.Group
+	jitterFraction float64
+	metrics        *cacheMetrics // nil => telemetry disabled
 }
 
 // fullKey prefixes the cache key with the configured prefix.
@@ -144,6 +121,22 @@ func (c *Cache[T]) fullKey(key string) string {
 		return key
 	}
 	return c.opts.Prefix + ":" + key
+}
+
+// positiveTTL returns the jittered positive TTL a value is stored under. When
+// AllowInfinite is set the base TTL (which may be <= 0, meaning no expiry) is
+// passed through unchanged; otherwise a downward jitter is applied.
+func (c *Cache[T]) positiveTTL() time.Duration {
+	if c.opts.AllowInfinite {
+		return c.opts.TTL
+	}
+	return applyJitter(c.opts.TTL, c.jitterFraction)
+}
+
+// negativeTTL returns the jittered TTL for a negative-cache marker. It is only
+// called when NegativeTTL > 0.
+func (c *Cache[T]) negativeTTL() time.Duration {
+	return applyJitter(c.opts.NegativeTTL, c.jitterFraction)
 }
 
 // Get reads through to loader on a cache miss. See Outcome for the result
@@ -161,10 +154,12 @@ func (c *Cache[T]) Get(ctx context.Context, key string, loader Loader[T]) (*T, O
 	raw, getErr := c.store.Get(ctx, k)
 	if getErr == nil {
 		if bytes.Equal(raw, negativeMarker) {
+			c.metrics.recordOutcome(ctx, NegativeHit)
 			return nil, NegativeHit, ErrNotFound
 		}
 		var v T
 		if uErr := c.codec.Unmarshal(raw, &v); uErr == nil {
+			c.metrics.recordOutcome(ctx, Hit)
 			return &v, Hit, nil
 		}
 		// Corrupt/unreadable cached entry: fall through and reload as if it were a miss.
@@ -181,17 +176,25 @@ func (c *Cache[T]) Get(ctx context.Context, key string, loader Loader[T]) (*T, O
 		val       *T
 		populated bool
 	}
+	// doLoad records only load-event metrics (latency for every loader run,
+	// load_error on a transient failure). The request-outcome counters are
+	// recorded once per caller AFTER group.Do returns, so that under
+	// singleflight every deduped waiter counts the request it was served while
+	// these load-event metrics still count the single actual load.
 	doLoad := func() (any, error) {
+		start := time.Now()
 		val, lerr := loader(ctx)
+		c.metrics.recordLoadLatencySeconds(ctx, time.Since(start).Seconds())
 		switch {
 		case errors.Is(lerr, ErrNotFound):
 			if c.opts.NegativeTTL > 0 {
-				if sErr := c.store.Set(ctx, k, negativeMarker, c.opts.NegativeTTL); sErr != nil {
+				if sErr := c.store.Set(ctx, k, negativeMarker, c.negativeTTL()); sErr != nil {
 					return nil, ErrNotFound
 				}
 			}
 			return nil, ErrNotFound
 		case lerr != nil:
+			c.metrics.recordLoadError(ctx)
 			return nil, lerr
 		case val == nil:
 			// Loader violated its contract (nil, nil) — treat as not-found, do not cache.
@@ -202,7 +205,7 @@ func (c *Cache[T]) Get(ctx context.Context, key string, loader Loader[T]) (*T, O
 		if mErr != nil {
 			return &loadResult{val: val}, nil
 		}
-		if sErr := c.store.Set(ctx, k, b, c.opts.TTL); sErr != nil {
+		if sErr := c.store.Set(ctx, k, b, c.positiveTTL()); sErr != nil {
 			return &loadResult{val: val}, nil
 		}
 		return &loadResult{val: val, populated: true}, nil
@@ -217,15 +220,23 @@ func (c *Cache[T]) Get(ctx context.Context, key string, loader Loader[T]) (*T, O
 	}
 
 	if errors.Is(lerr, ErrNotFound) {
+		// A fresh not-found folds into Loaded (the warm counterpart is
+		// NegativeHit, recorded on the fast path). Per caller: N deduped waiters
+		// each count the request they were served.
+		c.metrics.recordOutcome(ctx, Loaded)
 		return nil, Loaded, ErrNotFound
 	}
 	if lerr != nil {
+		// Transient load error: already metered as load_error inside doLoad;
+		// never counted as a served outcome.
 		return nil, Loaded, lerr
 	}
 	out, _ := res.(*loadResult) //nolint:not-an-error -- doLoad always returns *loadResult on nil error
 	if out.populated {
+		c.metrics.recordOutcome(ctx, Loaded)
 		return out.val, Loaded, nil
 	}
+	c.metrics.recordOutcome(ctx, LoadedNotCached)
 	return out.val, LoadedNotCached, nil
 }
 
@@ -255,11 +266,14 @@ func (c *Cache[T]) Put(ctx context.Context, key string, writer Writer[T]) (*T, O
 	k := c.fullKey(key)
 	b, mErr := c.codec.Marshal(val)
 	if mErr != nil {
+		c.metrics.recordOutcome(ctx, WrittenNotCached)
 		return val, WrittenNotCached, nil
 	}
-	if sErr := c.store.Set(ctx, k, b, c.opts.TTL); sErr != nil {
+	if sErr := c.store.Set(ctx, k, b, c.positiveTTL()); sErr != nil {
+		c.metrics.recordOutcome(ctx, WrittenNotCached)
 		return val, WrittenNotCached, nil
 	}
+	c.metrics.recordOutcome(ctx, Written)
 	return val, Written, nil
 }
 
@@ -271,17 +285,19 @@ func (c *Cache[T]) PutValue(ctx context.Context, key string, val *T) error {
 	if err != nil {
 		return err
 	}
-	return c.store.Set(ctx, c.fullKey(key), b, c.opts.TTL)
+	return c.store.Set(ctx, c.fullKey(key), b, c.positiveTTL())
 }
 
 // Evict deletes key (delete-on-write). It returns the delete error so the caller
 // can retry or alarm; the TTL backstop bounds staleness if it fails.
 func (c *Cache[T]) Evict(ctx context.Context, key string) error {
+	c.metrics.recordEvict(ctx, 1)
 	return c.store.Delete(ctx, c.fullKey(key))
 }
 
 // EvictMany deletes several keys, joining any errors.
 func (c *Cache[T]) EvictMany(ctx context.Context, keys ...string) error {
+	c.metrics.recordEvict(ctx, int64(len(keys)))
 	var errs []error
 	for _, key := range keys {
 		if err := c.store.Delete(ctx, c.fullKey(key)); err != nil {
@@ -289,4 +305,144 @@ func (c *Cache[T]) EvictMany(ctx context.Context, keys ...string) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// GetMany reads several keys in one batch: cache hits (and warm negative
+// hits) are served without touching loadMissing; keys not found in the cache
+// are collected and loaded in ONE loadMissing call, then populated back into
+// the cache (with per-key downward jitter, on both the positive TTL and
+// NegativeTTL). Keys loadMissing does not return are negative-cached (when
+// NegativeTTL > 0) and omitted from the result map. Unlike Get, GetMany is
+// never deduplicated via singleflight.
+func (c *Cache[T]) GetMany(
+	ctx context.Context,
+	keys []string,
+	loadMissing func(ctx context.Context, missing []string) (map[string]*T, error),
+) (map[string]*T, error) {
+	if len(keys) == 0 {
+		return map[string]*T{}, nil
+	}
+
+	fullToOrig, fullKeys := c.dedupKeys(keys)
+	raw := c.readManyRaw(ctx, fullKeys)
+	result, missing := c.splitHitsAndMisses(ctx, fullKeys, fullToOrig, raw)
+
+	if len(missing) == 0 {
+		return result, nil
+	}
+
+	start := time.Now()
+	loaded, lErr := loadMissing(ctx, missing)
+	c.metrics.recordLoadLatencySeconds(ctx, time.Since(start).Seconds())
+	if lErr != nil {
+		c.metrics.recordLoadError(ctx)
+		return nil, fmt.Errorf("smartcache: GetMany load: %w", lErr)
+	}
+
+	c.populateLoaded(ctx, missing, loaded, result)
+	return result, nil
+}
+
+// dedupKeys maps each unique key to its full (prefixed) form, returning both
+// the lookup map and the ordered list of unique full keys.
+func (c *Cache[T]) dedupKeys(keys []string) (fullToOrig map[string]string, fullKeys []string) {
+	fullToOrig = make(map[string]string, len(keys))
+	fullKeys = make([]string, 0, len(keys))
+	for _, key := range keys {
+		fk := c.fullKey(key)
+		if _, seen := fullToOrig[fk]; seen {
+			continue
+		}
+		fullToOrig[fk] = key
+		fullKeys = append(fullKeys, fk)
+	}
+	return fullToOrig, fullKeys
+}
+
+// readManyRaw reads fullKeys via the batch store when available, otherwise
+// falling back to one Get per key. A batch-read error is treated as a total
+// miss (never fails the request), matching Get's read-error-is-a-miss policy.
+func (c *Cache[T]) readManyRaw(ctx context.Context, fullKeys []string) map[string][]byte {
+	if c.batch != nil {
+		raw, bErr := c.batch.GetMany(ctx, fullKeys)
+		if bErr != nil {
+			return map[string][]byte{}
+		}
+		return raw
+	}
+	raw := make(map[string][]byte, len(fullKeys))
+	for _, fk := range fullKeys {
+		b, gErr := c.store.Get(ctx, fk)
+		if gErr == nil {
+			raw[fk] = b
+		}
+	}
+	return raw
+}
+
+// splitHitsAndMisses classifies each full key's raw bytes into a cache hit
+// (added to result), a negative hit (metered, omitted from result), or a miss
+// (absent or corrupt — appended to missing for loadMissing to resolve).
+func (c *Cache[T]) splitHitsAndMisses(
+	ctx context.Context,
+	fullKeys []string,
+	fullToOrig map[string]string,
+	raw map[string][]byte,
+) (result map[string]*T, missing []string) {
+	result = make(map[string]*T, len(fullKeys))
+	for _, fk := range fullKeys {
+		origKey := fullToOrig[fk]
+		b, ok := raw[fk]
+		if !ok {
+			missing = append(missing, origKey)
+			continue
+		}
+		if bytes.Equal(b, negativeMarker) {
+			c.metrics.recordOutcome(ctx, NegativeHit)
+			continue
+		}
+		var v T
+		if uErr := c.codec.Unmarshal(b, &v); uErr != nil {
+			// Corrupt/unreadable cached entry: treat as a miss and reload.
+			missing = append(missing, origKey)
+			continue
+		}
+		result[origKey] = &v
+		c.metrics.recordOutcome(ctx, Hit)
+	}
+	return result, missing
+}
+
+// populateLoaded merges loadMissing's result into result and populates the
+// cache: a key found in loaded is cached under positiveTTL; a key absent (or
+// nil) is negative-cached under NegativeTTL when enabled, and is never added
+// to result either way.
+func (c *Cache[T]) populateLoaded(ctx context.Context, missing []string, loaded, result map[string]*T) {
+	for _, origKey := range missing {
+		fk := c.fullKey(origKey)
+		v, ok := loaded[origKey]
+		if ok && v != nil {
+			result[origKey] = v
+			b, mErr := c.codec.Marshal(v)
+			if mErr != nil {
+				c.metrics.recordOutcome(ctx, LoadedNotCached)
+				continue
+			}
+			if sErr := c.store.Set(ctx, fk, b, c.positiveTTL()); sErr != nil {
+				c.metrics.recordOutcome(ctx, LoadedNotCached)
+				continue
+			}
+			c.metrics.recordOutcome(ctx, Loaded)
+			continue
+		}
+		// Not found in the source of truth: negative-cache when enabled, but
+		// never add it to the result map either way.
+		if c.opts.NegativeTTL > 0 {
+			if sErr := c.store.Set(ctx, fk, negativeMarker, c.negativeTTL()); sErr != nil {
+				c.metrics.recordOutcome(ctx, LoadedNotCached)
+				continue
+			}
+		}
+		c.metrics.recordOutcome(ctx, Loaded)
+	}
 }

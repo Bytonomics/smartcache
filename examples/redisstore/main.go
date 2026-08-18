@@ -28,8 +28,8 @@ type User struct {
 	Name string
 }
 
-// loadUserFromDB stands in for a real database call. It "finds" u_1 and
-// u_2, and reports anything else as not found.
+// loadUserFromDB stands in for a real database call. It "finds" u_1, u_2, and
+// u_5, and reports anything else as not found.
 func loadUserFromDB(_ context.Context, id string) (*User, error) {
 	fmt.Printf("  [DB] loading %s...\n", id)
 	switch id {
@@ -37,6 +37,8 @@ func loadUserFromDB(_ context.Context, id string) (*User, error) {
 		return &User{ID: "u_1", Name: "Ada Lovelace"}, nil
 	case "u_2":
 		return &User{ID: "u_2", Name: "Grace Hopper"}, nil
+	case "u_5":
+		return &User{ID: "u_5", Name: "Margaret Hamilton"}, nil
 	default:
 		return nil, smartcache.ErrNotFound
 	}
@@ -60,10 +62,14 @@ func main() {
 
 	store := redisstore.New(rdb)
 
-	users, err := smartcache.New[User](store, smartcache.Options{
-		Prefix:      "smartcache-example:user",
-		TTL:         time.Hour,
-		NegativeTTL: 30 * time.Second, // cache "not found" briefly too
+	mgr, err := smartcache.NewManager(store)
+	if err != nil {
+		panic(err)
+	}
+
+	users, err := smartcache.Register[User](mgr, "smartcache-example:user", &smartcache.EntityOptions{
+		TTL:         ptrDuration(time.Hour),
+		NegativeTTL: ptrDuration(30 * time.Second), // cache "not found" briefly too
 	})
 	if err != nil {
 		panic(err)
@@ -91,7 +97,7 @@ func main() {
 	fmt.Printf("Outcome: %s  (served entirely from Redis, no database round trip)\n\n", outcome)
 
 	fmt.Println("=== Step 3: Get for \"u_404\" (a user that does not exist) ===")
-	fmt.Println("The loader reports \"not found\" for this id. Because Options.NegativeTTL was set")
+	fmt.Println("The loader reports \"not found\" for this id. Because EntityOptions.NegativeTTL was set")
 	fmt.Println("to 30s, smartcache also writes this \"not found\" result to Redis — so repeated")
 	fmt.Println("lookups of the same missing id (a common source of cache-penetration load) skip")
 	fmt.Println("the database too, for as long as the negative entry stays valid.")
@@ -142,10 +148,40 @@ func main() {
 	fmt.Printf("Result: %+v\n", *user)
 	fmt.Printf("Outcome: %s  (Evict forced this back to a cache miss)\n\n", outcome)
 
-	fmt.Println("=== Step 7: Cleanup ===")
+	fmt.Println("=== Step 7: GetMany for [\"u_1\", \"u_5\", \"u_404\"] (one cached hit, one cold miss, one not-found) ===")
+	fmt.Println("GetMany batches a read-through lookup over a single Redis MGET: cached keys are")
+	fmt.Println("served without touching your database at all; every key that misses Redis is")
+	fmt.Println("loaded in ONE call to your batch loader (not one call per key), then each result")
+	fmt.Println("is written back to Redis individually.")
+	loadManyCalls := 0
+	got, err := users.GetMany(ctx, []string{"u_1", "u_5", "u_404"}, func(ctx context.Context, missing []string) (map[string]*User, error) {
+		loadManyCalls++
+		fmt.Printf("  [DB] batch-loading %v...\n", missing)
+		out := make(map[string]*User, len(missing))
+		for _, id := range missing {
+			if u, lErr := loadUserFromDB(ctx, id); lErr == nil {
+				out[id] = u
+			}
+		}
+		return out, nil
+	})
+	must(err)
+	fmt.Printf("Batch loader calls: %d (u_1 was already cached; u_5 and u_404 were loaded together in one call)\n", loadManyCalls)
+	for _, id := range []string{"u_1", "u_5", "u_404"} {
+		if u, ok := got[id]; ok {
+			fmt.Printf("  %s: %+v\n", id, *u)
+		} else {
+			fmt.Printf("  %s: not found (omitted from the result)\n", id)
+		}
+	}
+	fmt.Println()
+
+	fmt.Println("=== Step 8: Cleanup ===")
 	fmt.Println("Removing this example's keys from Redis so re-running it starts from a clean")
 	fmt.Println("slate — real applications rely on TTL expiry instead of doing this manually.")
-	must(users.EvictMany(ctx, "u_1", "u_2", "u_3", "u_404"))
+	must(users.EvictMany(ctx, "u_1", "u_2", "u_3", "u_5", "u_404"))
+
+	must(mgr.Shutdown(ctx))
 }
 
 func must(err error) {
@@ -153,3 +189,5 @@ func must(err error) {
 		panic(err)
 	}
 }
+
+func ptrDuration(d time.Duration) *time.Duration { return &d }

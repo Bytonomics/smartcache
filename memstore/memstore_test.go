@@ -199,3 +199,33 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestGetMany_ReturnsFoundOmitsMissing verifies the batch read returns present
+// keys and omits absent ones.
+func TestGetMany_ReturnsFoundOmitsMissing(t *testing.T) {
+	ctx := context.Background()
+	s := memstore.New()
+	bs, ok := s.(smartcache.BatchCacheStore)
+	if !ok {
+		t.Fatal("memstore must implement smartcache.BatchCacheStore")
+	}
+	if err := s.Set(ctx, "a", []byte("A"), time.Minute); err != nil {
+		t.Fatalf("Set a: %v", err)
+	}
+	if err := s.Set(ctx, "c", []byte("C"), time.Minute); err != nil {
+		t.Fatalf("Set c: %v", err)
+	}
+	got, err := bs.GetMany(ctx, []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("GetMany: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 present, got %d (%v)", len(got), got)
+	}
+	if string(got["a"]) != "A" || string(got["c"]) != "C" {
+		t.Errorf("wrong values: %v", got)
+	}
+	if _, present := got["b"]; present {
+		t.Error("absent key b must be omitted from the result")
+	}
+}

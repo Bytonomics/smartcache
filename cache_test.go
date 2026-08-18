@@ -13,41 +13,15 @@ import (
 	"github.com/Bytonomics/smartcache/memstore"
 )
 
-// failSetStore wraps a Store but forces Set to fail.
-type failSetStore struct{ smartcache.CacheStore }
-
-func (f failSetStore) Set(ctx context.Context, key string, val []byte, ttl time.Duration) error {
-	return errors.New("forced set failure")
-}
-
-// failDeleteStore wraps a Store but forces Delete to fail.
-type failDeleteStore struct{ smartcache.CacheStore }
-
-func (f failDeleteStore) Delete(ctx context.Context, key string) error {
-	return errors.New("forced delete failure")
-}
-
-// countingSetStore wraps a CacheStore and counts Set calls, to verify Get's
-// singleflight-deduped populate step runs exactly once per cold miss, not
-// once per waiter.
-type countingSetStore struct {
-	smartcache.CacheStore
-	setCalls int64
-}
-
-func (c *countingSetStore) Set(ctx context.Context, key string, val []byte, ttl time.Duration) error {
-	atomic.AddInt64(&c.setCalls, 1)
-	return c.CacheStore.Set(ctx, key, val, ttl)
-}
-
-// sample is test data type.
-type sample struct{ N int }
-
 // TestGet_ReadThrough_MissThenHit verifies cache miss followed by cache hit behavior.
 func TestGet_ReadThrough_MissThenHit(t *testing.T) {
-	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{Prefix: "p", TTL: time.Minute})
+	mgr, err := smartcache.NewManager(memstore.New())
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "read-through", &smartcache.EntityOptions{Prefix: ptr("p"), TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	var calls int
@@ -91,9 +65,13 @@ func TestGet_ReadThrough_MissThenHit(t *testing.T) {
 
 // TestEvict_ReloadsOnNextGet verifies eviction forces reload.
 func TestEvict_ReloadsOnNextGet(t *testing.T) {
-	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{Prefix: "p", TTL: time.Minute})
+	mgr, err := smartcache.NewManager(memstore.New())
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "evict-reload", &smartcache.EntityOptions{Prefix: ptr("p"), TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	var calls int
@@ -144,67 +122,18 @@ func TestEvict_ReloadsOnNextGet(t *testing.T) {
 	}
 }
 
-// TestNew_TTLValidation verifies TTL validation.
-func TestNew_TTLValidation(t *testing.T) {
-	// TTL=0, AllowInfinite=false should fail
-	_, err := smartcache.New[sample](memstore.New(), smartcache.Options{TTL: 0})
-	if err == nil {
-		t.Fatal("New with TTL=0, AllowInfinite=false: expected error, got nil")
-	}
-	if !errors.Is(err, smartcache.ErrInvalidTTL) {
-		t.Errorf("New TTL=0 error: got %v, want smartcache.ErrInvalidTTL", err)
-	}
-
-	// TTL=0, AllowInfinite=true should succeed
-	_, err = smartcache.New[sample](memstore.New(), smartcache.Options{TTL: 0, AllowInfinite: true})
-	if err != nil {
-		t.Fatalf("New with TTL=0, AllowInfinite=true failed: %v", err)
-	}
-
-	// TTL=time.Minute should succeed
-	_, err = smartcache.New[sample](memstore.New(), smartcache.Options{TTL: time.Minute})
-	if err != nil {
-		t.Fatalf("New with TTL=time.Minute failed: %v", err)
-	}
-}
-
-// TestNew_PanicsOnPointerType verifies T being a pointer type panics: it is a
-// programming error (the wrong generic instantiation at the call site),
-// caught at construction rather than returned as a runtime error.
-func TestNew_PanicsOnPointerType(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("New[*sample]: expected a panic, got none")
-		}
-		err, ok := r.(error)
-		if !ok {
-			t.Fatalf("panic value is not an error: %v (%T)", r, r)
-		}
-		if !errors.Is(err, smartcache.ErrPointerType) {
-			t.Errorf("panic error: got %v, want smartcache.ErrPointerType", err)
-		}
-		if !strings.Contains(err.Error(), "sample") {
-			t.Errorf("panic error does not name the offending type: %v", err)
-		}
-	}()
-	c, err := smartcache.New[*sample](memstore.New(), smartcache.Options{TTL: time.Minute})
-	if err != nil {
-		t.Fatalf("New[*sample] returned an error instead of panicking: %v", err)
-	}
-	if c != nil {
-		t.Fatalf("New[*sample] returned a non-nil Cache instead of panicking: %+v", c)
-	}
-}
-
 // TestNegativeCaching_Enabled verifies negative caching when enabled.
 func TestNegativeCaching_Enabled(t *testing.T) {
-	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{
-		TTL:         time.Minute,
-		NegativeTTL: time.Minute,
+	mgr, err := smartcache.NewManager(memstore.New())
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "neg-on", &smartcache.EntityOptions{
+		TTL:         ptr(time.Minute),
+		NegativeTTL: ptr(time.Minute),
 	})
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	var calls int
@@ -245,12 +174,13 @@ func TestNegativeCaching_Enabled(t *testing.T) {
 
 // TestNegativeCaching_Disabled verifies smartcache.ErrNotFound is not cached when NegativeTTL is 0.
 func TestNegativeCaching_Disabled(t *testing.T) {
-	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{
-		TTL:         time.Minute,
-		NegativeTTL: 0,
-	})
+	mgr, err := smartcache.NewManager(memstore.New())
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "neg-off", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	var calls int
@@ -286,9 +216,13 @@ func TestNegativeCaching_Disabled(t *testing.T) {
 // TestGet_PopulateFailure_NonFatal verifies non-fatal store failure on populate.
 func TestGet_PopulateFailure_NonFatal(t *testing.T) {
 	store := failSetStore{memstore.New()}
-	c, err := smartcache.New[sample](store, smartcache.Options{TTL: time.Minute})
+	mgr, err := smartcache.NewManager(store)
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "populate-fail", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	loader := func(ctx context.Context) (*sample, error) {
@@ -312,14 +246,17 @@ func TestGet_PopulateFailure_NonFatal(t *testing.T) {
 // TestEvict_Failure_Surfaced verifies Evict error is returned.
 func TestEvict_Failure_Surfaced(t *testing.T) {
 	store := failDeleteStore{memstore.New()}
-	c, err := smartcache.New[sample](store, smartcache.Options{TTL: time.Minute})
+	mgr, err := smartcache.NewManager(store)
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "evict-fail", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	ctx := context.Background()
-	err = c.Evict(ctx, "k")
-	if err == nil {
+	if err := c.Evict(ctx, "k"); err == nil {
 		t.Fatal("Evict with store Delete failure: expected error, got nil")
 	}
 }
@@ -327,23 +264,30 @@ func TestEvict_Failure_Surfaced(t *testing.T) {
 // TestEvictMany_JoinsErrors verifies EvictMany returns error on Delete failure.
 func TestEvictMany_JoinsErrors(t *testing.T) {
 	store := failDeleteStore{memstore.New()}
-	c, err := smartcache.New[sample](store, smartcache.Options{TTL: time.Minute})
+	mgr, err := smartcache.NewManager(store)
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "evictmany-fail", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	ctx := context.Background()
-	err = c.EvictMany(ctx, "a", "b")
-	if err == nil {
+	if err := c.EvictMany(ctx, "a", "b"); err == nil {
 		t.Fatal("EvictMany with store Delete failure: expected error, got nil")
 	}
 }
 
 // TestPutValue_ThenHit verifies PutValue populates cache and is served on next Get.
 func TestPutValue_ThenHit(t *testing.T) {
-	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{TTL: time.Minute})
+	mgr, err := smartcache.NewManager(memstore.New())
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "putvalue", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	ctx := context.Background()
@@ -374,9 +318,13 @@ func TestPutValue_ThenHit(t *testing.T) {
 // TestPut_WriterSuccess_ThenHit verifies Put runs writer, caches its result,
 // and the value is served from cache on the next Get.
 func TestPut_WriterSuccess_ThenHit(t *testing.T) {
-	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{TTL: time.Minute})
+	mgr, err := smartcache.NewManager(memstore.New())
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "put-success", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	ctx := context.Background()
@@ -418,9 +366,13 @@ func TestPut_WriterSuccess_ThenHit(t *testing.T) {
 // TestPut_WriterError_PropagatedNotCached verifies a writer error is returned
 // unchanged and the cache is left untouched.
 func TestPut_WriterError_PropagatedNotCached(t *testing.T) {
-	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{TTL: time.Minute})
+	mgr, err := smartcache.NewManager(memstore.New())
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "put-writer-err", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	ctx := context.Background()
@@ -457,9 +409,13 @@ func TestPut_WriterError_PropagatedNotCached(t *testing.T) {
 // TestPut_WriterNilValue_ErrNilWrite verifies a writer returning (nil, nil)
 // is rejected with ErrNilWrite and the cache is left untouched.
 func TestPut_WriterNilValue_ErrNilWrite(t *testing.T) {
-	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{TTL: time.Minute})
+	mgr, err := smartcache.NewManager(memstore.New())
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "put-nil-write", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	ctx := context.Background()
@@ -496,9 +452,13 @@ func TestPut_WriterNilValue_ErrNilWrite(t *testing.T) {
 // WrittenNotCached, and never fails the call.
 func TestPut_PopulateFailure_NonFatal(t *testing.T) {
 	store := failSetStore{memstore.New()}
-	c, err := smartcache.New[sample](store, smartcache.Options{TTL: time.Minute})
+	mgr, err := smartcache.NewManager(store)
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "put-populate-fail", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	ctx := context.Background()
@@ -522,9 +482,13 @@ func TestPut_PopulateFailure_NonFatal(t *testing.T) {
 // two concurrent Put calls for the same key both run their own writer, unlike
 // Get's loader deduplication.
 func TestPut_ConcurrentCalls_NotDeduped(t *testing.T) {
-	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{TTL: time.Minute})
+	mgr, err := smartcache.NewManager(memstore.New())
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "put-not-deduped", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	ctx := context.Background()
@@ -553,9 +517,13 @@ func TestPut_ConcurrentCalls_NotDeduped(t *testing.T) {
 
 // TestSingleflight_DedupsColdLoads verifies concurrent Gets deduplicate loader calls.
 func TestSingleflight_DedupsColdLoads(t *testing.T) {
-	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{TTL: time.Minute})
+	mgr, err := smartcache.NewManager(memstore.New())
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "dedup-cold", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	var calls int64
@@ -590,10 +558,14 @@ func TestSingleflight_DedupsColdLoads(t *testing.T) {
 // waiter. Regression test: populate used to run after the singleflight
 // closure returned, so every waiter redundantly re-populated the cache.
 func TestSingleflight_PopulatesOnce(t *testing.T) {
-	store := &countingSetStore{CacheStore: memstore.New()}
-	c, err := smartcache.New[sample](store, smartcache.Options{TTL: time.Minute})
+	store := &captureStore{CacheStore: memstore.New()}
+	mgr, err := smartcache.NewManager(store)
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "populate-once", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	loader := func(ctx context.Context) (*sample, error) {
@@ -612,9 +584,8 @@ func TestSingleflight_PopulatesOnce(t *testing.T) {
 	}
 	wg.Wait()
 
-	setCalls := atomic.LoadInt64(&store.setCalls)
-	if setCalls != 1 {
-		t.Errorf("Set calls after 20 concurrent cold Gets: got %d, want 1 (populate must run once, not once per waiter)", setCalls)
+	if got := len(store.setTTLs); got != 1 {
+		t.Errorf("Set calls after 20 concurrent cold Gets: got %d, want 1 (populate must run once, not once per waiter)", got)
 	}
 }
 
@@ -622,10 +593,14 @@ func TestSingleflight_PopulatesOnce(t *testing.T) {
 // negative-cache path: 20 concurrent Gets for a missing key write the
 // "not found" marker exactly once.
 func TestSingleflight_PopulatesNegativeMarkerOnce(t *testing.T) {
-	store := &countingSetStore{CacheStore: memstore.New()}
-	c, err := smartcache.New[sample](store, smartcache.Options{TTL: time.Minute, NegativeTTL: time.Minute})
+	store := &captureStore{CacheStore: memstore.New()}
+	mgr, err := smartcache.NewManager(store)
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "populate-neg-once", &smartcache.EntityOptions{TTL: ptr(time.Minute), NegativeTTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	loader := func(ctx context.Context) (*sample, error) {
@@ -644,17 +619,20 @@ func TestSingleflight_PopulatesNegativeMarkerOnce(t *testing.T) {
 	}
 	wg.Wait()
 
-	setCalls := atomic.LoadInt64(&store.setCalls)
-	if setCalls != 1 {
-		t.Errorf("Set calls after 20 concurrent cold Gets for a missing key: got %d, want 1", setCalls)
+	if got := len(store.setTTLs); got != 1 {
+		t.Errorf("Set calls after 20 concurrent cold Gets for a missing key: got %d, want 1", got)
 	}
 }
 
 // TestGet_TransientLoaderError_NotCached verifies transient errors are not cached.
 func TestGet_TransientLoaderError_NotCached(t *testing.T) {
-	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{TTL: time.Minute})
+	mgr, err := smartcache.NewManager(memstore.New())
 	if err != nil {
-		t.Fatalf("New failed: %v", err)
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "transient-err", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
 	}
 
 	var calls int
@@ -693,5 +671,38 @@ func TestGet_TransientLoaderError_NotCached(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("Second Get calls: got %d, want 2", calls)
+	}
+}
+
+// TestRegister_PanicsOnPointerType verifies T being a pointer type panics: it is a
+// programming error (the wrong generic instantiation at the call site),
+// caught at construction rather than returned as a runtime error.
+func TestRegister_PanicsOnPointerType(t *testing.T) {
+	mgr, err := smartcache.NewManager(memstore.New())
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Register[*sample]: expected a panic, got none")
+		}
+		err, ok := r.(error)
+		if !ok {
+			t.Fatalf("panic value is not an error: %v (%T)", r, r)
+		}
+		if !errors.Is(err, smartcache.ErrPointerType) {
+			t.Errorf("panic error: got %v, want smartcache.ErrPointerType", err)
+		}
+		if !strings.Contains(err.Error(), "sample") {
+			t.Errorf("panic error does not name the offending type: %v", err)
+		}
+	}()
+	c, err := smartcache.Register[*sample](mgr, "ptr-panic", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register[*sample] returned an error instead of panicking: %v", err)
+	}
+	if c != nil {
+		t.Fatalf("Register[*sample] returned a non-nil Cache instead of panicking: %+v", c)
 	}
 }

@@ -23,6 +23,8 @@ type fakeConn struct {
 	lastSetKey string
 	lastSetVal any
 	lastSetTTL time.Duration
+	mgetVals   []interface{}
+	mgetErr    error
 }
 
 var _ redisstore.RedisConn = (*fakeConn)(nil)
@@ -44,6 +46,10 @@ func (f *fakeConn) Del(ctx context.Context, keys ...string) *redis.IntCmd {
 
 func (f *fakeConn) Exists(ctx context.Context, keys ...string) *redis.IntCmd {
 	return redis.NewIntResult(f.existsN, f.existsErr)
+}
+
+func (f *fakeConn) MGet(ctx context.Context, keys ...string) *redis.SliceCmd {
+	return redis.NewSliceResult(f.mgetVals, f.mgetErr)
 }
 
 func TestGet_Present(t *testing.T) {
@@ -172,5 +178,44 @@ func TestExists(t *testing.T) {
 	_, err = st3.Exists(ctx, "k")
 	if err == nil {
 		t.Error("expected error, got nil")
+	}
+}
+
+func TestGetMany_MapsPresentOmitsNil(t *testing.T) {
+	ctx := context.Background()
+	fc := &fakeConn{mgetVals: []interface{}{"A", nil, "C"}}
+	bs, ok := redisstore.New(fc).(smartcache.BatchCacheStore)
+	if !ok {
+		t.Fatal("redisstore must implement smartcache.BatchCacheStore")
+	}
+	got, err := bs.GetMany(ctx, []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("GetMany: %v", err)
+	}
+	if string(got["a"]) != "A" || string(got["c"]) != "C" {
+		t.Errorf("values: %v", got)
+	}
+	if _, present := got["b"]; present {
+		t.Error("nil (absent) element must be omitted")
+	}
+}
+
+func TestGetMany_ErrorPropagates(t *testing.T) {
+	fc := &fakeConn{mgetErr: errors.New("mget boom")}
+	bs := redisstore.New(fc).(smartcache.BatchCacheStore)
+	if _, err := bs.GetMany(context.Background(), []string{"a"}); err == nil {
+		t.Error("expected error from MGet")
+	}
+}
+
+func TestGetMany_Empty(t *testing.T) {
+	fc := &fakeConn{}
+	bs := redisstore.New(fc).(smartcache.BatchCacheStore)
+	got, err := bs.GetMany(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("want empty map, got %v", got)
 	}
 }

@@ -4,6 +4,7 @@ package memstore
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -23,7 +24,10 @@ type store struct {
 	data map[string]entry
 }
 
-var _ smartcache.CacheStore = (*store)(nil)
+var (
+	_ smartcache.CacheStore      = (*store)(nil)
+	_ smartcache.BatchCacheStore = (*store)(nil)
+)
 
 // New returns a new in-memory smartcache.CacheStore.
 func New() smartcache.CacheStore {
@@ -83,4 +87,23 @@ func (s *store) Exists(ctx context.Context, key string) (bool, error) {
 		return false, nil
 	}
 	return true, nil
+}
+
+// GetMany reads several keys, reusing Get so per-key expiry and the defensive
+// copy apply. Absent/expired keys (ErrStoreMiss) are omitted; any other error
+// aborts.
+func (s *store) GetMany(ctx context.Context, keys []string) (map[string][]byte, error) {
+	out := make(map[string][]byte, len(keys))
+	for _, k := range keys {
+		b, err := s.Get(ctx, k)
+		switch {
+		case err == nil:
+			out[k] = b
+		case errors.Is(err, smartcache.ErrStoreMiss):
+			// absent or expired: omit from the result
+		default:
+			return nil, err
+		}
+	}
+	return out, nil
 }

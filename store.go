@@ -21,6 +21,18 @@ type CacheStore interface {
 	Exists(ctx context.Context, key string) (bool, error)
 }
 
+// BatchCacheStore is an optional extension of CacheStore for backends that can
+// read many keys in one round trip. Cache[T].GetMany uses it when the injected
+// store implements it (redisstore does, via MGET); stores that do not are
+// handled transparently by GetMany's per-key fallback.
+type BatchCacheStore interface {
+	CacheStore
+	// GetMany returns the raw bytes for the keys that are present. Keys that are
+	// absent (or expired) are omitted from the returned map — a miss is never an
+	// error here.
+	GetMany(ctx context.Context, keys []string) (map[string][]byte, error)
+}
+
 // Codec serializes cached values to and from bytes. The default (when
 // Options.Codec is nil) is encoding/json.
 type Codec interface {

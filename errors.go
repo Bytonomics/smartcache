@@ -12,22 +12,37 @@ var (
 	// briefly and returns it from Get.
 	ErrNotFound = errors.New("smartcache: not found")
 
-	// ErrInvalidTTL is returned by New when Options.TTL <= 0 and Options.AllowInfinite
-	// is false.
+	// ErrInvalidTTL is returned by Register when the resolved TTL <= 0 and
+	// AllowInfinite is false.
 	ErrInvalidTTL = errors.New("smartcache: TTL must be > 0 (set AllowInfinite for no expiry)")
 
-	// ErrPointerType is the value New panics with when T is itself a pointer
+	// ErrPointerType is the value Register panics with when T is itself a pointer
 	// type. Cache[T] already returns *T from every method; T being a pointer
 	// too makes that a double pointer (e.g. **User), which opens a hole where
 	// a non-nil outer pointer can wrap a nil inner one — silently violating
 	// the "a successful Get/Put never returns nil" guarantee the rest of this
 	// package relies on. This is a programming error at the call site
-	// (New[*User] instead of New[User]), not a runtime condition, so New
-	// panics with it instead of returning it.
+	// (Register[*User] instead of Register[User]), not a runtime condition, so
+	// Register panics with it instead of returning it.
 	ErrPointerType = errors.New("smartcache: T must not itself be a pointer type")
 
 	// ErrNilWrite is returned by Put when writer succeeds (nil error) but
 	// returns a nil value. The cache is never set to nil, so this is treated
 	// as a contract violation, not a cacheable state.
 	ErrNilWrite = errors.New("smartcache: writer returned a nil value with no error")
+
+	// ErrNilStore is returned by NewManager when the CacheStore is nil.
+	ErrNilStore = errors.New("smartcache: store must not be nil")
+
+	// ErrEmptyName is returned by Register when the cache name is empty. The name
+	// is required: it is both the metric name and the default key prefix.
+	ErrEmptyName = errors.New("smartcache: cache name must not be empty")
+
+	// ErrDuplicateName is returned by Register when a cache name is already
+	// registered on the manager. Each registered cache must have a unique name.
+	ErrDuplicateName = errors.New("smartcache: cache name already registered")
+
+	// ErrInvalidJitterFraction is returned by Register when the resolved jitter
+	// fraction is outside [0, 1). Zero disables jitter.
+	ErrInvalidJitterFraction = errors.New("smartcache: jitter fraction must be in [0, 1)")
 )
