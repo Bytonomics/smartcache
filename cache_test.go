@@ -3,6 +3,7 @@ package smartcache_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -154,6 +155,35 @@ func TestNew_TTLValidation(t *testing.T) {
 	}
 }
 
+// TestNew_PanicsOnPointerType verifies T being a pointer type panics: it is a
+// programming error (the wrong generic instantiation at the call site),
+// caught at construction rather than returned as a runtime error.
+func TestNew_PanicsOnPointerType(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("New[*sample]: expected a panic, got none")
+		}
+		err, ok := r.(error)
+		if !ok {
+			t.Fatalf("panic value is not an error: %v (%T)", r, r)
+		}
+		if !errors.Is(err, smartcache.ErrPointerType) {
+			t.Errorf("panic error: got %v, want smartcache.ErrPointerType", err)
+		}
+		if !strings.Contains(err.Error(), "sample") {
+			t.Errorf("panic error does not name the offending type: %v", err)
+		}
+	}()
+	c, err := smartcache.New[*sample](memstore.New(), smartcache.Options{TTL: time.Minute})
+	if err != nil {
+		t.Fatalf("New[*sample] returned an error instead of panicking: %v", err)
+	}
+	if c != nil {
+		t.Fatalf("New[*sample] returned a non-nil Cache instead of panicking: %+v", c)
+	}
+}
+
 // TestNegativeCaching_Enabled verifies negative caching when enabled.
 func TestNegativeCaching_Enabled(t *testing.T) {
 	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{
@@ -296,8 +326,8 @@ func TestEvictMany_JoinsErrors(t *testing.T) {
 	}
 }
 
-// TestPut_ThenHit verifies Put populates cache and is served on next Get.
-func TestPut_ThenHit(t *testing.T) {
+// TestPutValue_ThenHit verifies PutValue populates cache and is served on next Get.
+func TestPutValue_ThenHit(t *testing.T) {
 	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{TTL: time.Minute})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
@@ -305,23 +335,20 @@ func TestPut_ThenHit(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Put a value
-	err = c.Put(ctx, "k", &sample{N: 9})
+	// PutValue a value directly
+	err = c.PutValue(ctx, "k", &sample{N: 9})
 	if err != nil {
-		t.Fatalf("Put failed: %v", err)
+		t.Fatalf("PutValue failed: %v", err)
 	}
 
 	// Get with a loader that should not be called
-	loaderCalled := false
 	loader := func(ctx context.Context) (*sample, error) {
-		loaderCalled = true
-		t.Fatal("loader should not be called")
-		return nil, nil
+		panic("loader should not be called")
 	}
 
 	val, outcome, err := c.Get(ctx, "k", loader)
 	if err != nil {
-		t.Fatalf("Get after Put failed: %v", err)
+		t.Fatalf("Get after PutValue failed: %v", err)
 	}
 	if val == nil || val.N != 9 {
 		t.Errorf("Get value: got %v, want N=9", val)
@@ -329,8 +356,185 @@ func TestPut_ThenHit(t *testing.T) {
 	if outcome != smartcache.Hit {
 		t.Errorf("Get outcome: got %v, want Hit", outcome)
 	}
-	if loaderCalled {
-		t.Fatal("loader was called when it should not have been")
+}
+
+// TestPut_WriterSuccess_ThenHit verifies Put runs writer, caches its result,
+// and the value is served from cache on the next Get.
+func TestPut_WriterSuccess_ThenHit(t *testing.T) {
+	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{TTL: time.Minute})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	ctx := context.Background()
+	var writerCalls int
+	writer := func(ctx context.Context) (*sample, error) {
+		writerCalls++
+		return &sample{N: 11}, nil
+	}
+
+	val, outcome, err := c.Put(ctx, "k", writer)
+	if err != nil {
+		t.Fatalf("Put failed: %v", err)
+	}
+	if val == nil || val.N != 11 {
+		t.Errorf("Put value: got %v, want N=11", val)
+	}
+	if outcome != smartcache.Written {
+		t.Errorf("Put outcome: got %v, want Written", outcome)
+	}
+	if writerCalls != 1 {
+		t.Errorf("writer calls: got %d, want 1", writerCalls)
+	}
+
+	loader := func(ctx context.Context) (*sample, error) {
+		panic("loader should not be called")
+	}
+	val2, outcome2, err2 := c.Get(ctx, "k", loader)
+	if err2 != nil {
+		t.Fatalf("Get after Put failed: %v", err2)
+	}
+	if val2 == nil || val2.N != 11 {
+		t.Errorf("Get value: got %v, want N=11", val2)
+	}
+	if outcome2 != smartcache.Hit {
+		t.Errorf("Get outcome: got %v, want Hit", outcome2)
+	}
+}
+
+// TestPut_WriterError_PropagatedNotCached verifies a writer error is returned
+// unchanged and the cache is left untouched.
+func TestPut_WriterError_PropagatedNotCached(t *testing.T) {
+	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{TTL: time.Minute})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	ctx := context.Background()
+	writerErr := errors.New("write to source of truth failed")
+	writer := func(ctx context.Context) (*sample, error) {
+		return nil, writerErr
+	}
+
+	val, outcome, err := c.Put(ctx, "k", writer)
+	if val != nil {
+		t.Errorf("Put value: got %v, want nil", val)
+	}
+	if !errors.Is(err, writerErr) {
+		t.Errorf("Put error: got %v, want %v", err, writerErr)
+	}
+	if outcome != smartcache.Written {
+		t.Errorf("Put outcome: got %v, want Written", outcome)
+	}
+
+	// Confirm nothing was cached: Get must call the loader.
+	var loaderCalls int
+	loader := func(ctx context.Context) (*sample, error) {
+		loaderCalls++
+		return &sample{N: 1}, nil
+	}
+	if _, _, err := c.Get(ctx, "k", loader); err != nil {
+		t.Fatalf("Get after failed Put failed: %v", err)
+	}
+	if loaderCalls != 1 {
+		t.Errorf("loader calls after failed Put: got %d, want 1 (nothing should have been cached)", loaderCalls)
+	}
+}
+
+// TestPut_WriterNilValue_ErrNilWrite verifies a writer returning (nil, nil)
+// is rejected with ErrNilWrite and the cache is left untouched.
+func TestPut_WriterNilValue_ErrNilWrite(t *testing.T) {
+	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{TTL: time.Minute})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	ctx := context.Background()
+	writer := func(ctx context.Context) (*sample, error) {
+		return nil, nil
+	}
+
+	val, outcome, err := c.Put(ctx, "k", writer)
+	if val != nil {
+		t.Errorf("Put value: got %v, want nil", val)
+	}
+	if !errors.Is(err, smartcache.ErrNilWrite) {
+		t.Errorf("Put error: got %v, want smartcache.ErrNilWrite", err)
+	}
+	if outcome != smartcache.Written {
+		t.Errorf("Put outcome: got %v, want Written", outcome)
+	}
+
+	var loaderCalls int
+	loader := func(ctx context.Context) (*sample, error) {
+		loaderCalls++
+		return &sample{N: 1}, nil
+	}
+	if _, _, err := c.Get(ctx, "k", loader); err != nil {
+		t.Fatalf("Get after nil-write Put failed: %v", err)
+	}
+	if loaderCalls != 1 {
+		t.Errorf("loader calls after nil-write Put: got %d, want 1 (nothing should have been cached)", loaderCalls)
+	}
+}
+
+// TestPut_PopulateFailure_NonFatal verifies a cache-side Set failure after a
+// successful writer still returns the written value, with Outcome ==
+// WrittenNotCached, and never fails the call.
+func TestPut_PopulateFailure_NonFatal(t *testing.T) {
+	store := failSetStore{memstore.New()}
+	c, err := smartcache.New[sample](store, smartcache.Options{TTL: time.Minute})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	ctx := context.Background()
+	writer := func(ctx context.Context) (*sample, error) {
+		return &sample{N: 5}, nil
+	}
+
+	val, outcome, err := c.Put(ctx, "k", writer)
+	if err != nil {
+		t.Errorf("Put with store Set failure: got error %v, want nil", err)
+	}
+	if val == nil || val.N != 5 {
+		t.Errorf("Put value: got %v, want N=5", val)
+	}
+	if outcome != smartcache.WrittenNotCached {
+		t.Errorf("Put outcome: got %v, want WrittenNotCached", outcome)
+	}
+}
+
+// TestPut_ConcurrentCalls_NotDeduped verifies Put never uses singleflight:
+// two concurrent Put calls for the same key both run their own writer, unlike
+// Get's loader deduplication.
+func TestPut_ConcurrentCalls_NotDeduped(t *testing.T) {
+	c, err := smartcache.New[sample](memstore.New(), smartcache.Options{TTL: time.Minute})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	ctx := context.Background()
+	var writerCalls int64
+	writer := func(ctx context.Context) (*sample, error) {
+		time.Sleep(20 * time.Millisecond)
+		n := atomic.AddInt64(&writerCalls, 1)
+		return &sample{N: int(n)}, nil
+	}
+
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Go(func() {
+			if _, _, putErr := c.Put(ctx, "same", writer); putErr != nil {
+				t.Errorf("concurrent Put failed: %v", putErr)
+			}
+		})
+	}
+	wg.Wait()
+
+	callCount := atomic.LoadInt64(&writerCalls)
+	if callCount != 20 {
+		t.Errorf("writer calls after 20 concurrent Puts: got %d, want 20 (Put must not dedupe via singleflight)", callCount)
 	}
 }
 
@@ -352,12 +556,12 @@ func TestSingleflight_DedupsColdLoads(t *testing.T) {
 
 	// Launch 20 concurrent Gets on the same key
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, _, _ = c.Get(ctx, "same", loader)
-		}()
+	for range 20 {
+		wg.Go(func() {
+			if _, _, getErr := c.Get(ctx, "same", loader); getErr != nil {
+				t.Errorf("concurrent Get failed: %v", getErr)
+			}
+		})
 	}
 	wg.Wait()
 

@@ -82,17 +82,36 @@ func main() {
 	fmt.Printf("Outcome: %s  (this call reached the loader; a repeat within 30s would report NegativeHit instead)\n", outcome)
 	fmt.Printf("Caller check: errors.Is(err, smartcache.ErrNotFound) = %v\n\n", errors.Is(err, smartcache.ErrNotFound))
 
-	fmt.Println("=== Step 4: Put \"u_2\" directly, without going through Get ===")
-	fmt.Println("Put is for when you already hold the fresh value — e.g. right after your own")
+	fmt.Println("=== Step 4: PutValue \"u_2\" directly, without going through Get ===")
+	fmt.Println("PutValue is for when you already hold the fresh value — e.g. right after your own")
 	fmt.Println("code just inserted it into the database — and want to warm the cache immediately")
 	fmt.Println("instead of waiting for the next Get to trigger a load.")
-	must(users.Put(ctx, "u_2", &User{ID: "u_2", Name: "Grace Hopper"}))
+	must(users.PutValue(ctx, "u_2", &User{ID: "u_2", Name: "Grace Hopper"}))
 	user, outcome, err = users.Get(ctx, "u_2", loader)
 	must(err)
 	fmt.Printf("Result: %+v\n", *user)
-	fmt.Printf("Outcome: %s  (served from what Put stored; the loader above was never invoked)\n\n", outcome)
+	fmt.Printf("Outcome: %s  (served from what PutValue stored; the loader above was never invoked)\n\n", outcome)
 
-	fmt.Println("=== Step 5: Evict \"u_1\" (e.g. after updating the user elsewhere) ===")
+	fmt.Println("=== Step 5: Put \"u_3\" through a writer function (write-through) ===")
+	fmt.Println("Put is for when the write itself should go through smartcache: it calls your")
+	fmt.Println("writer function to persist the value to the source of truth, then caches exactly")
+	fmt.Println("the value writer returned. Unlike Get's loader, writer is never deduplicated —")
+	fmt.Println("every Put call performs its own write, since dropping a concurrent write would")
+	fmt.Println("silently lose data.")
+	newUser := &User{ID: "u_3", Name: "Katherine Johnson"}
+	_, outcome, err = users.Put(ctx, "u_3", func(_ context.Context) (*User, error) {
+		fmt.Printf("  [DB] writing %s...\n", newUser.ID)
+		return newUser, nil
+	})
+	must(err)
+	fmt.Printf("Outcome: %s  (writer ran and the value it returned was cached)\n\n", outcome)
+
+	user, outcome, err = users.Get(ctx, "u_3", loader)
+	must(err)
+	fmt.Printf("Result: %+v\n", *user)
+	fmt.Printf("Outcome: %s  (served from what Put cached; the loader above was never invoked)\n\n", outcome)
+
+	fmt.Println("=== Step 6: Evict \"u_1\" (e.g. after updating the user elsewhere) ===")
 	fmt.Println("Evict removes the cached entry right away — this is smartcache's delete-on-write")
 	fmt.Println("path, used after a write to your source of truth so stale data is never served.")
 	fmt.Println("The next Get for this key is therefore a cold read again, just like Step 1.")

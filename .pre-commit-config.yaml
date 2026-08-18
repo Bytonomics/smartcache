@@ -1,0 +1,82 @@
+# Pre-commit hooks configuration for smartcache
+#
+# Setup:
+#   brew install pre-commit (or pip install pre-commit)
+#   pre-commit install
+#
+# Usage:
+#   pre-commit run --all-files              # Run all hooks
+#   pre-commit run <hook-id>                # Run specific hook
+#
+# To skip hooks temporarily:
+#   git commit --no-verify -m "message"
+#
+# Hook execution order:
+#   1. Security (gitleaks)
+#   2. Go styling (go-fmt, go-vet, golangci-lint)
+#   3. Go build
+#   4. Go tests
+
+repos:
+  # ============================================
+  # 1. SECURITY HOOKS (run first)
+  # ============================================
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks
+
+  # ============================================
+  # 2. GO STYLING HOOKS (before build)
+  # This single hook covers every .go file in the repo, core library and
+  # examples/ alike — there is no separate fmt hook per tier.
+  # ============================================
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: go-fmt
+
+  # ============================================
+  # 3-4. CUSTOM LOCAL HOOKS
+  # Hook ids match the Makefile target names exactly — no invented labels.
+  # build-check already runs go vet internally (see Makefile), so there is no
+  # separate vet hook. Core (smartcache library, root Makefile) runs
+  # build-check + lint + unit-test-coverage. examples/ (its own Makefile, own
+  # go.mod) only defines build-check, so that is its only hook — disambiguated
+  # as build-check-examples since the id build-check is already taken by core.
+  # pre-commit stops at the first failing hook, so each issue is resolved
+  # before the next check runs.
+  # ============================================
+  - repo: local
+    hooks:
+      - id: build-check
+        name: build-check
+        description: Runs make build-check
+        entry: make build-check
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: lint
+        name: lint
+        description: Runs make lint
+        entry: make lint
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: unit-test-coverage
+        name: unit-test-coverage
+        description: Runs make unit-test-coverage (race detection + coverage threshold)
+        entry: make unit-test-coverage
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: build-check-examples
+        name: build-check-examples
+        description: Runs make -C examples build-check
+        entry: make -C examples build-check
+        language: system
+        types: [go]
+        pass_filenames: false
