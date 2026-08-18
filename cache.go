@@ -146,7 +146,15 @@ func (c *Cache[T]) fullKey(key string) string {
 	return c.opts.Prefix + ":" + key
 }
 
-// Get reads through to loader on a cache miss. See Outcome for the result modes.
+// Get reads through to loader on a cache miss. See Outcome for the result
+// modes.
+//
+// Sharing note: when singleflight is enabled (the default), a Loaded or
+// LoadedNotCached result may be the exact same *T handed to every concurrent
+// caller deduped onto the same loader call — that is singleflight.Do's own
+// contract. Treat a Loaded/LoadedNotCached result as read-only; copy it
+// before mutating. A Hit result is always freshly unmarshaled per call and
+// is never shared with another caller.
 func (c *Cache[T]) Get(ctx context.Context, key string, loader Loader[T]) (*T, Outcome, error) {
 	k := c.fullKey(key)
 
@@ -164,41 +172,61 @@ func (c *Cache[T]) Get(ctx context.Context, key string, loader Loader[T]) (*T, O
 	// Any store.Get error (including ErrStoreMiss) or an unmarshal failure is treated
 	// as a miss — a backend read error must not fail the request more than the DB does.
 
-	var val *T
+	// doLoad runs the loader and populates the cache in one step. Running the
+	// populate step here (inside the deduped call) instead of after group.Do
+	// returns means only the one goroutine that actually calls the loader also
+	// does the Marshal+Set — concurrent waiters share this one result instead
+	// of each redundantly re-populating the cache.
+	type loadResult struct {
+		val       *T
+		populated bool
+	}
+	doLoad := func() (any, error) {
+		val, lerr := loader(ctx)
+		switch {
+		case errors.Is(lerr, ErrNotFound):
+			if c.opts.NegativeTTL > 0 {
+				if sErr := c.store.Set(ctx, k, negativeMarker, c.opts.NegativeTTL); sErr != nil {
+					return nil, ErrNotFound
+				}
+			}
+			return nil, ErrNotFound
+		case lerr != nil:
+			return nil, lerr
+		case val == nil:
+			// Loader violated its contract (nil, nil) — treat as not-found, do not cache.
+			return nil, ErrNotFound
+		}
+
+		b, mErr := c.codec.Marshal(val)
+		if mErr != nil {
+			return &loadResult{val: val}, nil
+		}
+		if sErr := c.store.Set(ctx, k, b, c.opts.TTL); sErr != nil {
+			return &loadResult{val: val}, nil
+		}
+		return &loadResult{val: val, populated: true}, nil
+	}
+
+	var res any
 	var lerr error
 	if c.group != nil {
-		res, sfErr, _ := c.group.Do(k, func() (any, error) { //nolint:not-an-error
-			return loader(ctx)
-		})
-		lerr = sfErr
-		if res != nil {
-			val, _ = res.(*T) //nolint:not-an-error
-		}
+		res, lerr, _ = c.group.Do(k, doLoad) //nolint:not-an-error -- discards singleflight's "shared" bool, which this code has no use for
 	} else {
-		val, lerr = loader(ctx)
+		res, lerr = doLoad()
 	}
 
-	switch {
-	case errors.Is(lerr, ErrNotFound):
-		if c.opts.NegativeTTL > 0 {
-			_ = c.store.Set(ctx, k, negativeMarker, c.opts.NegativeTTL)
-		}
+	if errors.Is(lerr, ErrNotFound) {
 		return nil, Loaded, ErrNotFound
-	case lerr != nil:
+	}
+	if lerr != nil {
 		return nil, Loaded, lerr
-	case val == nil:
-		// Loader violated its contract (nil, nil) — treat as not-found, do not cache.
-		return nil, Loaded, ErrNotFound
 	}
-
-	b, mErr := c.codec.Marshal(val)
-	if mErr != nil {
-		return val, LoadedNotCached, nil
+	out, _ := res.(*loadResult) //nolint:not-an-error -- doLoad always returns *loadResult on nil error
+	if out.populated {
+		return out.val, Loaded, nil
 	}
-	if sErr := c.store.Set(ctx, k, b, c.opts.TTL); sErr != nil {
-		return val, LoadedNotCached, nil
-	}
-	return val, Loaded, nil
+	return out.val, LoadedNotCached, nil
 }
 
 // Put performs a write-through: it calls writer to persist the value to your

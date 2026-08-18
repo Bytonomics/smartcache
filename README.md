@@ -1,6 +1,6 @@
 # smartcache
 
-A small, dependency-light, type-safe generic read-through and delete-on-write cache for Go over a pluggable byte key-value backend.
+A small, dependency-light Go cache library whose one generic, type-safe `Cache[T]` does **both read-through and write-through** over a **pluggable, backend-agnostic store** — so you stop re-implementing the miss → load → populate → invalidate dance for every entity, and you can swap Redis for in-memory (or your own backend) without touching a single call site.
 
 ## Install
 
@@ -8,14 +8,41 @@ A small, dependency-light, type-safe generic read-through and delete-on-write ca
 go get github.com/Bytonomics/smartcache
 ```
 
-## Core Concepts
+## Why smartcache
 
-- **`CacheStore` interface** — the injected cache backend (never the application's own database). `memstore` (in-memory) and `redisstore` (go-redis) are provided; bring your own implementation for any other system.
-- **Generic `Cache[T]`** — read-through `Get` with a loader function; write-through `Put` with a writer function; `PutValue` to cache a value you already hold, with no external write; `Evict` and `EvictMany` for delete-on-write.
-- **Required positive TTL backstop** — `Options.TTL` must be set. Opt in to no expiry via `AllowInfinite: true`.
-- **Optional negative caching** — cache "not found" results for a separate duration via `Options.NegativeTTL`.
-- **Singleflight de-duplication** — concurrent cold loads for the same key are serialized (on by default; disable via `DisableSingleflight: true`).
-- **Pluggable `Codec`** — customize serialization. JSON is the default when `Options.Codec` is nil.
+Most Go caching options are either a **raw store** (a Redis client, an in-memory map) that hands you `get`/`set` and leaves you to build — and repeat — the read-through, write-through, and invalidation logic at every call site, or an **in-memory-only cache** with no way to put a real backend behind the same API. smartcache is the missing middle: one primitive that owns that orchestration for you, generically and type-safely, over whatever backend you inject.
+
+**The core value:**
+
+- **One `Cache[T]` for both directions** — read-through (`Get` + a loader) *and* write-through (`Put` + a writer) in the same type-safe primitive; no `interface{}`, no manual casts.
+- **Backend-agnostic** — `Cache[T]` talks only to a small `CacheStore` interface. `redisstore` and `memstore` ship in the box; anything else (an LRU, `ristretto`, `bigcache`, your own service) is a tiny adapter, and swapping backends never changes a call site.
+
+**Correct by default** — the choices that prevent the classic caching bugs are made for you, not left as footguns:
+
+- **Required TTL backstop** — a value can never be cached forever by accident, so a missed or failed invalidation self-heals within a bounded window (opt into no-expiry explicitly with `AllowInfinite`).
+- **Delete-on-write** — writes evict rather than overwrite in place, avoiding the concurrent stale-set race.
+- **A cache failure never fails your operation** — if writing to the backend fails, your `Get`/`Put` still returns the real value; the cache stays a performance layer, not a hard dependency.
+- **Cache-stampede protection** — concurrent reads that miss the same key are coalesced into a single load (see below).
+- **Optional negative caching** — briefly remember "not found" so repeated probes of bad or non-existent ids don't reach your database.
+
+### Cache stampede
+
+A **cache stampede** — also called a **thundering herd** (or "dog-piling") — happens when a hot key is missing or has just expired and many concurrent requests all miss it at the same instant, so they *all* fall through to the database at once and can overwhelm it. smartcache prevents this on reads: concurrent `Get` calls for the same key are coalesced so that only one runs your loader and performs the write-back, while the rest wait and share that single result. This is on by default (disable with `DisableSingleflight`). Writes are never coalesced — each `Put`/`PutValue` is a distinct intended write.
+
+Background reading: [Cache stampede (Wikipedia)](https://en.wikipedia.org/wiki/Cache_stampede).
+
+## Features
+
+- **Read-through (`Get` + loader)** — on a cache miss, `Get` runs the loader function you pass, caches exactly what it returned, and returns it; on a hit, the loader never runs. Repeat reads for a hot key stop touching your database.
+- **Write-through (`Put` + writer)** — `Put` persists a value to your source of truth via your writer function, then caches exactly what was written, so the next `Get` for that key is served from cache with no database round trip. (`PutValue` caches a value you already hold, with no external write.)
+- **Delete-on-write (`Evict` / `EvictMany`)** — after a write or update, you evict the key rather than overwrite it in place; the next read reloads the truth. Evicting instead of updating avoids the concurrent *stale-set race*, where two overlapping updates can leave the older value cached.
+- **Required TTL backstop** — `Options.TTL` must be positive (or you must opt into no expiry explicitly with `AllowInfinite: true`). No entry is ever cached forever by accident, so a missed or failed eviction can only leave a stale value for a bounded window, never permanently.
+- **Negative caching (opt-in via `NegativeTTL`)** — a loader that reports "not found" (`ErrNotFound`) is remembered briefly, so repeated lookups of a bad or non-existent id don't keep falling through to your database — a defense against cache-penetration load.
+- **Single-process stampede protection (on by default; `DisableSingleflight` to turn off)** — concurrent `Get` calls that miss the same key are coalesced so only one runs the loader and the write-back, while the rest wait and share that single result. This prevents a *cache stampede / thundering herd* (see [Why smartcache](#why-smartcache)). It de-duplicates within one process; across multiple instances each process still loads once.
+- **Pluggable backend + codec** — `Cache[T]` talks only to the small `CacheStore` interface, so `memstore` (in-memory), `redisstore` (go-redis), or your own adapter are interchangeable without changing call sites. Serialization is a pluggable `Codec` (JSON by default when `Options.Codec` is nil) — swap it to compress or encrypt values.
+- **Prefix namespacing** — each `Cache[T]` can carry an `Options.Prefix`, so different entity caches (`user:`, `org:`, …) never collide on keys in a shared backend.
+- **A cache failure never fails your operation** — if writing the result to the backend fails, `Get` still returns the loaded value (`LoadedNotCached`) and `Put` still returns the written value (`WrittenNotCached`). The cache stays a performance layer, not a hard dependency. (An `Evict` failure *is* returned, so you can retry or alert — see [Failure Semantics](#failure-semantics).)
+- **Type-safety + pointer guard** — `Cache[T]` is generic: no `interface{}`, no manual casts. `New[T]` panics at construction if `T` is itself a pointer type, catching the `New[*User]` mistake (a `**User` that could smuggle a nil through a non-nil outer pointer) up front rather than as a surprise nil at runtime.
 
 ## Failure Semantics
 
@@ -169,6 +196,14 @@ or adding a new example with its own dependencies — never touches the root mod
 ## Implementation Notes
 
 The backend is an interface, so any store — or a fake, for tests — can replace Redis or in-memory storage without touching call sites.
+
+### Shared values under singleflight
+
+When singleflight is enabled (the default), a `Get` call that returns `Loaded` or `LoadedNotCached` may hand back
+the exact same `*T` given to every other concurrent caller deduped onto that same loader call — this is
+`singleflight.Do`'s own contract: all duplicate callers receive the one result the leader produced. Treat a
+`Loaded`/`LoadedNotCached` result as read-only; copy it before mutating. A `Hit` result is different: `Get`
+unmarshals a fresh value from the cache on every call, so it is never shared with another caller.
 
 ### The `CacheStore` interface
 

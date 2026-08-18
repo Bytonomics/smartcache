@@ -27,6 +27,19 @@ func (f failDeleteStore) Delete(ctx context.Context, key string) error {
 	return errors.New("forced delete failure")
 }
 
+// countingSetStore wraps a CacheStore and counts Set calls, to verify Get's
+// singleflight-deduped populate step runs exactly once per cold miss, not
+// once per waiter.
+type countingSetStore struct {
+	smartcache.CacheStore
+	setCalls int64
+}
+
+func (c *countingSetStore) Set(ctx context.Context, key string, val []byte, ttl time.Duration) error {
+	atomic.AddInt64(&c.setCalls, 1)
+	return c.CacheStore.Set(ctx, key, val, ttl)
+}
+
 // sample is test data type.
 type sample struct{ N int }
 
@@ -569,6 +582,71 @@ func TestSingleflight_DedupsColdLoads(t *testing.T) {
 	callCount := atomic.LoadInt64(&calls)
 	if callCount != 1 {
 		t.Errorf("Loader calls after 20 concurrent Gets: got %d, want 1", callCount)
+	}
+}
+
+// TestSingleflight_PopulatesOnce verifies that under 20 concurrent cold Gets
+// on the same key, the cache is populated exactly once — not once per
+// waiter. Regression test: populate used to run after the singleflight
+// closure returned, so every waiter redundantly re-populated the cache.
+func TestSingleflight_PopulatesOnce(t *testing.T) {
+	store := &countingSetStore{CacheStore: memstore.New()}
+	c, err := smartcache.New[sample](store, smartcache.Options{TTL: time.Minute})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	loader := func(ctx context.Context) (*sample, error) {
+		time.Sleep(20 * time.Millisecond)
+		return &sample{N: 1}, nil
+	}
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Go(func() {
+			if _, _, getErr := c.Get(ctx, "same", loader); getErr != nil {
+				t.Errorf("concurrent Get failed: %v", getErr)
+			}
+		})
+	}
+	wg.Wait()
+
+	setCalls := atomic.LoadInt64(&store.setCalls)
+	if setCalls != 1 {
+		t.Errorf("Set calls after 20 concurrent cold Gets: got %d, want 1 (populate must run once, not once per waiter)", setCalls)
+	}
+}
+
+// TestSingleflight_PopulatesNegativeMarkerOnce verifies the same for the
+// negative-cache path: 20 concurrent Gets for a missing key write the
+// "not found" marker exactly once.
+func TestSingleflight_PopulatesNegativeMarkerOnce(t *testing.T) {
+	store := &countingSetStore{CacheStore: memstore.New()}
+	c, err := smartcache.New[sample](store, smartcache.Options{TTL: time.Minute, NegativeTTL: time.Minute})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	loader := func(ctx context.Context) (*sample, error) {
+		time.Sleep(20 * time.Millisecond)
+		return nil, smartcache.ErrNotFound
+	}
+
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Go(func() {
+			if _, _, getErr := c.Get(ctx, "missing", loader); !errors.Is(getErr, smartcache.ErrNotFound) {
+				t.Errorf("concurrent Get error: got %v, want smartcache.ErrNotFound", getErr)
+			}
+		})
+	}
+	wg.Wait()
+
+	setCalls := atomic.LoadInt64(&store.setCalls)
+	if setCalls != 1 {
+		t.Errorf("Set calls after 20 concurrent cold Gets for a missing key: got %d, want 1", setCalls)
 	}
 }
 
