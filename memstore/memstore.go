@@ -1,4 +1,4 @@
-// Package memstore provides an in-memory smartcache.Store for unit tests and
+// Package memstore provides an in-memory smartcache.CacheStore for unit tests and
 // light use.
 package memstore
 
@@ -17,16 +17,16 @@ type entry struct {
 	expiresAt time.Time
 }
 
-// store is an in-memory smartcache.Store.
+// store is an in-memory smartcache.CacheStore.
 type store struct {
 	mu   sync.RWMutex
 	data map[string]entry
 }
 
-var _ smartcache.Store = (*store)(nil)
+var _ smartcache.CacheStore = (*store)(nil)
 
-// New returns a new in-memory smartcache.Store.
-func New() smartcache.Store {
+// New returns a new in-memory smartcache.CacheStore.
+func New() smartcache.CacheStore {
 	return &store{data: make(map[string]entry)}
 }
 

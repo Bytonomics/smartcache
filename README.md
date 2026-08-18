@@ -10,7 +10,7 @@ go get github.com/Bytonomics/smartcache
 
 ## Core Concepts
 
-- **`Store` interface** — the injected backend. `memstore` (in-memory) and `redisstore` (go-redis) are provided; bring your own implementation for any other system.
+- **`CacheStore` interface** — the injected cache backend (never the application's own database). `memstore` (in-memory) and `redisstore` (go-redis) are provided; bring your own implementation for any other system.
 - **Generic `Cache[T]`** — read-through `Get` with a loader function; `Put` for write-through; `Evict` and `EvictMany` for delete-on-write.
 - **Required positive TTL backstop** — `Options.TTL` must be set. Opt in to no expiry via `AllowInfinite: true`.
 - **Optional negative caching** — cache "not found" results for a separate duration via `Options.NegativeTTL`.
@@ -104,9 +104,9 @@ The backend is an interface, so any store — or a fake, for tests — can repla
 
 ### Adapting another cache library
 
-`Store` has four methods (`Get`/`Set`/`Delete`/`Exists`, all `[]byte`-in/`[]byte`-out). To back `Cache[T]` with any
-existing Go cache (an LRU, `ristretto`, `bigcache`, `patrickmn/go-cache`, …), write a small adapter type that
-implements `Store` by calling into that library — the same pattern `memstore` and `redisstore` already use. `Get`
+`CacheStore` has four methods (`Get`/`Set`/`Delete`/`Exists`, all `[]byte`-in/`[]byte`-out). To back `Cache[T]` with
+any existing Go cache (an LRU, `ristretto`, `bigcache`, `patrickmn/go-cache`, …), write a small adapter type that
+implements `CacheStore` by calling into that library — the same pattern `memstore` and `redisstore` already use. `Get`
 must return `ErrStoreMiss` (not the underlying library's own miss value) so `Cache[T]` recognizes it as a
 read-through miss.
 

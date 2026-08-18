@@ -1,4 +1,4 @@
-// Package redisstore provides a go-redis-backed smartcache.Store.
+// Package redisstore provides a go-redis-backed smartcache.CacheStore.
 package redisstore
 
 import (
@@ -21,15 +21,15 @@ type RedisConn interface {
 	Exists(ctx context.Context, keys ...string) *redis.IntCmd
 }
 
-// store is a go-redis-backed smartcache.Store.
+// store is a go-redis-backed smartcache.CacheStore.
 type store struct {
 	conn RedisConn
 }
 
-var _ smartcache.Store = (*store)(nil)
+var _ smartcache.CacheStore = (*store)(nil)
 
-// New returns a smartcache.Store backed by conn.
-func New(conn RedisConn) smartcache.Store {
+// New returns a smartcache.CacheStore backed by conn.
+func New(conn RedisConn) smartcache.CacheStore {
 	return &store{conn: conn}
 }
 

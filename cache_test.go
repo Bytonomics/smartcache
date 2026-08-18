@@ -13,14 +13,14 @@ import (
 )
 
 // failSetStore wraps a Store but forces Set to fail.
-type failSetStore struct{ smartcache.Store }
+type failSetStore struct{ smartcache.CacheStore }
 
 func (f failSetStore) Set(ctx context.Context, key string, val []byte, ttl time.Duration) error {
 	return errors.New("forced set failure")
 }
 
 // failDeleteStore wraps a Store but forces Delete to fail.
-type failDeleteStore struct{ smartcache.Store }
+type failDeleteStore struct{ smartcache.CacheStore }
 
 func (f failDeleteStore) Delete(ctx context.Context, key string) error {
 	return errors.New("forced delete failure")

@@ -5,11 +5,12 @@ import (
 	"time"
 )
 
-// Store is the backend abstraction Cache[T] depends on: a byte key-value store.
-// Cache[T] owns all (de)serialization, so the Store never sees the cached type T.
-// Swapping the backend (Redis, in-memory, anything) means providing a different
-// Store implementation; the cache API is unchanged.
-type Store interface {
+// CacheStore is the backend abstraction Cache[T] depends on: a byte key-value
+// cache store — never the application's own database. Cache[T] owns all
+// (de)serialization, so CacheStore never sees the cached type T. Swapping the
+// backend (Redis, in-memory, anything) means providing a different CacheStore
+// implementation; the Cache[T] API is unchanged.
+type CacheStore interface {
 	// Get returns the raw bytes for key, or ErrStoreMiss if the key is absent.
 	Get(ctx context.Context, key string) ([]byte, error)
 	// Set stores val under key with the given ttl. A ttl <= 0 means no expiry.

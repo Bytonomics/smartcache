@@ -79,9 +79,9 @@ type Options struct {
 	DisableSingleflight bool
 }
 
-// Cache is a generic, type-safe read-through / delete-on-write cache over a Store.
+// Cache is a generic, type-safe read-through / delete-on-write cache over a CacheStore.
 type Cache[T any] struct {
-	store Store
+	store CacheStore
 	opts  Options
 	codec Codec
 	group *singleflight.Group
@@ -89,7 +89,7 @@ type Cache[T any] struct {
 
 // New builds a Cache[T]. It returns ErrInvalidTTL if opts.TTL <= 0 and
 // opts.AllowInfinite is false.
-func New[T any](store Store, opts Options) (*Cache[T], error) {
+func New[T any](store CacheStore, opts Options) (*Cache[T], error) {
 	if opts.TTL <= 0 && !opts.AllowInfinite {
 		return nil, ErrInvalidTTL
 	}

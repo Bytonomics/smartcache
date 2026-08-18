@@ -3,7 +3,7 @@ package smartcache
 import "errors"
 
 var (
-	// ErrStoreMiss is returned by Store.Get when the key is absent. It is an
+	// ErrStoreMiss is returned by CacheStore.Get when the key is absent. It is an
 	// internal miss signal that Cache[T] handles; it is never surfaced to callers.
 	ErrStoreMiss = errors.New("smartcache: store miss")
 
