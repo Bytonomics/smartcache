@@ -26,7 +26,7 @@ func (c *Cache[T]) deleteValue(ctx context.Context, key string) error {
 }
 
 // GetByAlias reads a value by one of its alias keys (read-through: on a miss it runs loader, reads
-// the value's CachePrimaryKey, and rebuilds the group). Only valid on an alias-group cache.
+// the value's CacheUniqueKey, and rebuilds the group). Only valid on an alias-group cache.
 func (c *Cache[T]) GetByAlias(ctx context.Context, alias AliasRef, loader Loader[T]) (*T, Outcome, error) {
 	if !c.isAliasGroup {
 		return nil, Hit, ErrNotAliasGroup
@@ -60,11 +60,11 @@ func (c *Cache[T]) GetByAlias(ctx context.Context, alias AliasRef, loader Loader
 		case val == nil:
 			return nil, ErrNotFound
 		}
-		pkd, ok := any(val).(PrimaryKeyed)
+		pkd, ok := any(val).(UniqueKeyed)
 		if !ok {
 			return &loadResult{val: val}, nil
 		}
-		primary := pkd.CachePrimaryKey()
+		primary := pkd.CacheUniqueKey()
 		if primary == "" {
 			return &loadResult{val: val}, nil
 		}

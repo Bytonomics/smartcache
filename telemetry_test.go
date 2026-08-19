@@ -28,10 +28,10 @@ func TestMetrics_Get_HitAndLoaded(t *testing.T) {
 	ctx := context.Background()
 	loader := func(ctx context.Context) (*sample, error) { return &sample{N: 1}, nil }
 
-	if _, _, err := c.Get(ctx, "k", loader); err != nil {
+	if _, _, err := c.GetByKey(ctx, "k", loader); err != nil {
 		t.Fatalf("first Get failed: %v", err)
 	}
-	if _, _, err := c.Get(ctx, "k", loader); err != nil {
+	if _, _, err := c.GetByKey(ctx, "k", loader); err != nil {
 		t.Fatalf("second Get failed: %v", err)
 	}
 
@@ -63,10 +63,10 @@ func TestMetrics_Get_ColdNotFound_ThenWarmNegativeHit(t *testing.T) {
 	ctx := context.Background()
 	loader := func(ctx context.Context) (*sample, error) { return nil, smartcache.ErrNotFound }
 
-	if _, _, err := c.Get(ctx, "k", loader); !errors.Is(err, smartcache.ErrNotFound) {
+	if _, _, err := c.GetByKey(ctx, "k", loader); !errors.Is(err, smartcache.ErrNotFound) {
 		t.Fatalf("first Get: got %v, want smartcache.ErrNotFound", err)
 	}
-	if _, _, err := c.Get(ctx, "k", loader); !errors.Is(err, smartcache.ErrNotFound) {
+	if _, _, err := c.GetByKey(ctx, "k", loader); !errors.Is(err, smartcache.ErrNotFound) {
 		t.Fatalf("second Get: got %v, want smartcache.ErrNotFound", err)
 	}
 
@@ -94,7 +94,7 @@ func TestMetrics_Get_LoadError(t *testing.T) {
 	ctx := context.Background()
 	loader := func(ctx context.Context) (*sample, error) { return nil, errors.New("db down") }
 
-	if _, _, err := c.Get(ctx, "k", loader); err == nil {
+	if _, _, err := c.GetByKey(ctx, "k", loader); err == nil {
 		t.Fatal("Get: expected error, got nil")
 	}
 
@@ -121,7 +121,7 @@ func TestMetrics_Put_WrittenAndNotCached(t *testing.T) {
 
 	ctx := context.Background()
 	writer := func(ctx context.Context) (*sample, error) { return &sample{N: 1}, nil }
-	if _, _, err := c.Put(ctx, "k", writer); err != nil {
+	if _, _, err := c.PutByKey(ctx, "k", writer); err != nil {
 		t.Fatalf("Put failed: %v", err)
 	}
 
@@ -131,7 +131,7 @@ func TestMetrics_Put_WrittenAndNotCached(t *testing.T) {
 
 	writerErr := errors.New("boom")
 	failWriter := func(ctx context.Context) (*sample, error) { return nil, writerErr }
-	if _, _, err := c.Put(ctx, "k2", failWriter); !errors.Is(err, writerErr) {
+	if _, _, err := c.PutByKey(ctx, "k2", failWriter); !errors.Is(err, writerErr) {
 		t.Fatalf("Put with failing writer: got %v, want %v", err, writerErr)
 	}
 	if got := counterValue(t, reader, "smartcache.m-put.written"); got != 1 {
@@ -153,10 +153,10 @@ func TestMetrics_Evict_And_EvictMany(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := c.Evict(ctx, "a"); err != nil {
+	if err := c.EvictByKey(ctx, "a"); err != nil {
 		t.Fatalf("Evict failed: %v", err)
 	}
-	if err := c.EvictMany(ctx, "b", "c", "d"); err != nil {
+	if err := c.EvictManyByKey(ctx, "b", "c", "d"); err != nil {
 		t.Fatalf("EvictMany failed: %v", err)
 	}
 
@@ -209,7 +209,7 @@ func TestWithOTLP_RealExporter_Constructs(t *testing.T) {
 		t.Fatalf("Register failed: %v", err)
 	}
 	loader := func(ctx context.Context) (*sample, error) { return &sample{N: 1}, nil }
-	if _, _, err := c.Get(context.Background(), "k", loader); err != nil {
+	if _, _, err := c.GetByKey(context.Background(), "k", loader); err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
 
@@ -252,7 +252,7 @@ func TestMetrics_Get_ConcurrentColdLoads_CountsRequestsNotLoads(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Go(func() {
-			if _, _, getErr := c.Get(ctx, "same", loader); getErr != nil {
+			if _, _, getErr := c.GetByKey(ctx, "same", loader); getErr != nil {
 				t.Errorf("concurrent Get failed: %v", getErr)
 			}
 		})

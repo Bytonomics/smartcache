@@ -24,7 +24,7 @@ func TestJitter_DownwardWithinBounds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if _, _, err := c.Get(context.Background(), "k", func(ctx context.Context) (*sample, error) {
+	if _, _, err := c.GetByKey(context.Background(), "k", func(ctx context.Context) (*sample, error) {
 		return &sample{N: 1}, nil
 	}); err != nil {
 		t.Fatalf("Get: %v", err)
@@ -51,7 +51,7 @@ func TestJitter_ZeroFractionDisables(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if _, _, err := c.Get(context.Background(), "k", func(ctx context.Context) (*sample, error) {
+	if _, _, err := c.GetByKey(context.Background(), "k", func(ctx context.Context) (*sample, error) {
 		return &sample{N: 1}, nil
 	}); err != nil {
 		t.Fatalf("Get: %v", err)
@@ -79,7 +79,7 @@ func TestJitter_AppliedToNegativeTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if _, _, err := c.Get(context.Background(), "missing", func(ctx context.Context) (*sample, error) {
+	if _, _, err := c.GetByKey(context.Background(), "missing", func(ctx context.Context) (*sample, error) {
 		return nil, smartcache.ErrNotFound
 	}); err == nil {
 		t.Fatal("Get: expected ErrNotFound")
@@ -107,7 +107,7 @@ func TestJitter_SkippedWhenAllowInfinite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if _, _, err := c.Get(context.Background(), "k", func(ctx context.Context) (*sample, error) {
+	if _, _, err := c.GetByKey(context.Background(), "k", func(ctx context.Context) (*sample, error) {
 		return &sample{N: 1}, nil
 	}); err != nil {
 		t.Fatalf("Get: %v", err)

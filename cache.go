@@ -151,7 +151,7 @@ func (c *Cache[T]) negativeTTL() time.Duration {
 	return applyJitter(c.opts.NegativeTTL, c.jitterFraction)
 }
 
-// Get reads through to loader on a cache miss. See Outcome for the result
+// GetByKey reads through to loader on a cache miss. See Outcome for the result
 // modes.
 //
 // Sharing note: when singleflight is enabled (the default), a Loaded or
@@ -160,7 +160,7 @@ func (c *Cache[T]) negativeTTL() time.Duration {
 // contract. Treat a Loaded/LoadedNotCached result as read-only; copy it
 // before mutating. A Hit result is always freshly unmarshaled per call and
 // is never shared with another caller.
-func (c *Cache[T]) Get(ctx context.Context, key string, loader Loader[T]) (*T, Outcome, error) {
+func (c *Cache[T]) GetByKey(ctx context.Context, key string, loader Loader[T]) (*T, Outcome, error) {
 	raw, getErr := c.getValue(ctx, key)
 	if getErr == nil {
 		if bytes.Equal(raw, negativeMarker) {
@@ -250,21 +250,21 @@ func (c *Cache[T]) Get(ctx context.Context, key string, loader Loader[T]) (*T, O
 	return out.val, LoadedNotCached, nil
 }
 
-// Put performs a write-through: it calls writer to persist the value to your
+// PutByKey performs a write-through: it calls writer to persist the value to your
 // source of truth, then caches exactly the value writer returned. See Outcome
 // for the result modes.
 //
 // If writer fails, its error is returned unchanged and the cache is
-// untouched. If writer succeeds but returns a nil value, Put returns
+// untouched. If writer succeeds but returns a nil value, PutByKey returns
 // ErrNilWrite and the cache is untouched. If the cache-side write fails after
-// writer succeeded, Put still returns the value with Outcome ==
+// writer succeeded, PutByKey still returns the value with Outcome ==
 // WrittenNotCached — the real write already happened; only caching it
 // failed, and that must never look like a failed write to the caller.
 //
-// writer is never deduplicated the way Get's loader is: two concurrent Put
+// writer is never deduplicated the way GetByKey's loader is: two concurrent PutByKey
 // calls for the same key are two distinct writes, and singleflight would
 // silently drop one of them.
-func (c *Cache[T]) Put(ctx context.Context, key string, writer Writer[T]) (*T, Outcome, error) {
+func (c *Cache[T]) PutByKey(ctx context.Context, key string, writer Writer[T]) (*T, Outcome, error) {
 	val, err := writer(ctx)
 	if err != nil {
 		return nil, Written, err
@@ -286,10 +286,10 @@ func (c *Cache[T]) Put(ctx context.Context, key string, writer Writer[T]) (*T, O
 	return val, Written, nil
 }
 
-// PutValue writes a value you already hold directly into the cache — no
+// PutValueByKey writes a value you already hold directly into the cache — no
 // external write happens. Use this when you performed the real write
 // yourself and only need the cache updated to match it.
-func (c *Cache[T]) PutValue(ctx context.Context, key string, val *T) error {
+func (c *Cache[T]) PutValueByKey(ctx context.Context, key string, val *T) error {
 	b, err := c.codec.Marshal(val)
 	if err != nil {
 		return err
@@ -297,15 +297,15 @@ func (c *Cache[T]) PutValue(ctx context.Context, key string, val *T) error {
 	return c.setValue(ctx, key, b, c.positiveTTL())
 }
 
-// Evict deletes key (delete-on-write). It returns the delete error so the caller
+// EvictByKey deletes key (delete-on-write). It returns the delete error so the caller
 // can retry or alarm; the TTL backstop bounds staleness if it fails.
-func (c *Cache[T]) Evict(ctx context.Context, key string) error {
+func (c *Cache[T]) EvictByKey(ctx context.Context, key string) error {
 	c.metrics.recordEvict(ctx, 1)
 	return c.deleteValue(ctx, key)
 }
 
-// EvictMany deletes several keys, joining any errors.
-func (c *Cache[T]) EvictMany(ctx context.Context, keys ...string) error {
+// EvictManyByKey deletes several keys, joining any errors.
+func (c *Cache[T]) EvictManyByKey(ctx context.Context, keys ...string) error {
 	c.metrics.recordEvict(ctx, int64(len(keys)))
 	var errs []error
 	for _, key := range keys {
@@ -316,14 +316,14 @@ func (c *Cache[T]) EvictMany(ctx context.Context, keys ...string) error {
 	return errors.Join(errs...)
 }
 
-// GetMany reads several keys in one batch: cache hits (and warm negative
+// GetManyByKey reads several keys in one batch: cache hits (and warm negative
 // hits) are served without touching loadMissing; keys not found in the cache
 // are collected and loaded in ONE loadMissing call, then populated back into
 // the cache (with per-key downward jitter, on both the positive TTL and
 // NegativeTTL). Keys loadMissing does not return are negative-cached (when
-// NegativeTTL > 0) and omitted from the result map. Unlike Get, GetMany is
+// NegativeTTL > 0) and omitted from the result map. Unlike GetByKey, GetManyByKey is
 // never deduplicated via singleflight.
-func (c *Cache[T]) GetMany(
+func (c *Cache[T]) GetManyByKey(
 	ctx context.Context,
 	keys []string,
 	loadMissing func(ctx context.Context, missing []string) (map[string]*T, error),
@@ -448,4 +448,49 @@ func (c *Cache[T]) populateLoaded(ctx context.Context, missing []string, loaded,
 		}
 		c.metrics.recordOutcome(ctx, Loaded)
 	}
+}
+
+// uniqueKeyOf derives the cache key from a value's CacheUniqueKey(). Returns ErrNotUniqueKeyed
+// when the value is nil or T does not implement UniqueKeyed.
+func (c *Cache[T]) uniqueKeyOf(val *T) (string, error) {
+	if val == nil {
+		return "", ErrNilWrite
+	}
+	u, ok := any(val).(UniqueKeyed)
+	if !ok {
+		return "", ErrNotUniqueKeyed
+	}
+	return u.CacheUniqueKey(), nil
+}
+
+// Put is the value-derived write-through: it runs writer, derives the key from the returned
+// value's CacheUniqueKey(), then caches it. Returns ErrNotUniqueKeyed if T is not UniqueKeyed.
+func (c *Cache[T]) Put(ctx context.Context, writer Writer[T]) (*T, Outcome, error) {
+	val, err := writer(ctx)
+	if err != nil {
+		return nil, Written, err
+	}
+	key, kErr := c.uniqueKeyOf(val)
+	if kErr != nil {
+		return nil, Written, kErr
+	}
+	return c.PutByKey(ctx, key, func(context.Context) (*T, error) { return val, nil })
+}
+
+// PutValue is the value-derived direct write: it derives the key from val.CacheUniqueKey().
+func (c *Cache[T]) PutValue(ctx context.Context, val *T) error {
+	key, err := c.uniqueKeyOf(val)
+	if err != nil {
+		return err
+	}
+	return c.PutValueByKey(ctx, key, val)
+}
+
+// Evict is the value-derived delete: it derives the key from val.CacheUniqueKey().
+func (c *Cache[T]) Evict(ctx context.Context, val *T) error {
+	key, err := c.uniqueKeyOf(val)
+	if err != nil {
+		return err
+	}
+	return c.EvictByKey(ctx, key)
 }

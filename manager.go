@@ -232,10 +232,10 @@ func Register[T any](m *Manager, name string, opts *EntityOptions) (*Cache[T], e
 
 // RegisterAliasGroup registers an alias-group cache: one cached value reachable by several alias
 // keys. It behaves like Register but additionally (a) requires the manager's store to implement
-// AliasCacheStore, (b) requires T to implement PrimaryKeyed, and (c) resolves the slot mode from
+// AliasCacheStore, (b) requires T to implement UniqueKeyed, and (c) resolves the slot mode from
 // opts.AliasMode (default AliasColocated) and binds an AliasOps strategy handle via the store's
 // AliasGroup factory. Like Register's pointer-type check, it panics on a misconfiguration that
-// must fail at init: a pointer T, a store without AliasCacheStore, or a T that is not PrimaryKeyed.
+// must fail at init: a pointer T, a store without AliasCacheStore, or a T that is not UniqueKeyed.
 func RegisterAliasGroup[T any](m *Manager, name string, opts *EntityOptions) (*Cache[T], error) {
 	if t := reflect.TypeFor[T](); t.Kind() == reflect.Pointer {
 		panic(fmt.Errorf("smartcache.RegisterAliasGroup[%s]: %w", t, ErrPointerType))
@@ -244,8 +244,8 @@ func RegisterAliasGroup[T any](m *Manager, name string, opts *EntityOptions) (*C
 	if !ok {
 		panic(fmt.Errorf("smartcache.RegisterAliasGroup[%q]: %w", name, ErrAliasingNotSupported))
 	}
-	if _, ok := any((*T)(nil)).(PrimaryKeyed); !ok {
-		panic(fmt.Errorf("smartcache.RegisterAliasGroup[%q]: T must implement PrimaryKeyed (CachePrimaryKey() string)", name))
+	if _, ok := any((*T)(nil)).(UniqueKeyed); !ok {
+		panic(fmt.Errorf("smartcache.RegisterAliasGroup[%q]: T must implement UniqueKeyed (CacheUniqueKey() string)", name))
 	}
 	mode := AliasColocated
 	if opts != nil && opts.AliasMode != nil {

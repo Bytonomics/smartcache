@@ -12,11 +12,13 @@ type AliasRef struct {
 	Value string
 }
 
-// PrimaryKeyed is implemented by the value type T (or *T) cached in an alias-group cache. It lets
-// the library learn a value's primary key when rebuilding the group on a GetByAlias read-through
-// miss. It returns the primary key VALUE (e.g. "5").
-type PrimaryKeyed interface {
-	CachePrimaryKey() string
+// UniqueKeyed is implemented by a value type T cached with a unique key. The library uses
+// CacheUniqueKey() to (a) learn a value's primary key on a GetByAlias read-through miss (alias
+// groups), and (b) derive the storage/evict key in the value-derived methods Put/PutValue/Evict
+// on any cache. The unique key is a SYMBOLIC identity for the cached structure — it need not equal
+// the DB primary key and MAY be a composite (e.g. "provider:subscriptionID").
+type UniqueKeyed interface {
+	CacheUniqueKey() string
 }
 
 // AliasMode selects the Redis-Cluster slot-placement strategy for an alias-group cache.
@@ -37,7 +39,7 @@ const (
 // AliasOps is the per-(namespace, mode) strategy handle for an alias-group cache. It OWNS all
 // key-math and operation sequencing; Cache[T] delegates to it with logical identifiers (never a
 // pre-built key) and keeps codec, the negative-marker convention, metrics, singleflight, and
-// PrimaryKeyed. All methods are byte-level: the value bytes may be the internal negative marker,
+// UniqueKeyed. All methods are byte-level: the value bytes may be the internal negative marker,
 // which Cache[T] (not the store) interprets. A miss (absent, or a Sharded validate-on-read
 // mismatch) is signalled by returning ErrStoreMiss.
 type AliasOps interface {

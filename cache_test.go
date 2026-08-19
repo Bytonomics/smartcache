@@ -33,7 +33,7 @@ func TestGet_ReadThrough_MissThenHit(t *testing.T) {
 	ctx := context.Background()
 
 	// First Get: cache miss, loader called
-	val1, outcome1, err1 := c.Get(ctx, "k", loader)
+	val1, outcome1, err1 := c.GetByKey(ctx, "k", loader)
 	if err1 != nil {
 		t.Fatalf("First Get failed: %v", err1)
 	}
@@ -48,7 +48,7 @@ func TestGet_ReadThrough_MissThenHit(t *testing.T) {
 	}
 
 	// Second Get: cache hit, loader not called
-	val2, outcome2, err2 := c.Get(ctx, "k", loader)
+	val2, outcome2, err2 := c.GetByKey(ctx, "k", loader)
 	if err2 != nil {
 		t.Fatalf("Second Get failed: %v", err2)
 	}
@@ -83,7 +83,7 @@ func TestEvict_ReloadsOnNextGet(t *testing.T) {
 	ctx := context.Background()
 
 	// First Get: cache miss
-	_, outcome1, err1 := c.Get(ctx, "k", loader)
+	_, outcome1, err1 := c.GetByKey(ctx, "k", loader)
 	if err1 != nil {
 		t.Fatalf("First Get failed: %v", err1)
 	}
@@ -92,7 +92,7 @@ func TestEvict_ReloadsOnNextGet(t *testing.T) {
 	}
 
 	// Second Get: cache hit
-	_, outcome2, err2 := c.Get(ctx, "k", loader)
+	_, outcome2, err2 := c.GetByKey(ctx, "k", loader)
 	if err2 != nil {
 		t.Fatalf("Second Get failed: %v", err2)
 	}
@@ -104,13 +104,13 @@ func TestEvict_ReloadsOnNextGet(t *testing.T) {
 	}
 
 	// Evict the key
-	err = c.Evict(ctx, "k")
+	err = c.EvictByKey(ctx, "k")
 	if err != nil {
 		t.Fatalf("Evict failed: %v", err)
 	}
 
 	// Third Get: cache miss again
-	_, outcome3, err3 := c.Get(ctx, "k", loader)
+	_, outcome3, err3 := c.GetByKey(ctx, "k", loader)
 	if err3 != nil {
 		t.Fatalf("Third Get failed: %v", err3)
 	}
@@ -145,7 +145,7 @@ func TestNegativeCaching_Enabled(t *testing.T) {
 	ctx := context.Background()
 
 	// First Get: smartcache.ErrNotFound, cached as negative
-	val1, outcome1, err1 := c.Get(ctx, "k", loader)
+	val1, outcome1, err1 := c.GetByKey(ctx, "k", loader)
 	if val1 != nil {
 		t.Errorf("First Get value: got %v, want nil", val1)
 	}
@@ -160,7 +160,7 @@ func TestNegativeCaching_Enabled(t *testing.T) {
 	}
 
 	// Second Get: negative cache hit
-	_, outcome2, err2 := c.Get(ctx, "k", loader)
+	_, outcome2, err2 := c.GetByKey(ctx, "k", loader)
 	if !errors.Is(err2, smartcache.ErrNotFound) {
 		t.Errorf("Second Get error: got %v, want smartcache.ErrNotFound", err2)
 	}
@@ -192,7 +192,7 @@ func TestNegativeCaching_Disabled(t *testing.T) {
 	ctx := context.Background()
 
 	// First Get
-	_, outcome1, err1 := c.Get(ctx, "k", loader)
+	_, outcome1, err1 := c.GetByKey(ctx, "k", loader)
 	if !errors.Is(err1, smartcache.ErrNotFound) {
 		t.Errorf("First Get error: got %v, want smartcache.ErrNotFound", err1)
 	}
@@ -201,7 +201,7 @@ func TestNegativeCaching_Disabled(t *testing.T) {
 	}
 
 	// Second Get: should call loader again
-	_, outcome2, err2 := c.Get(ctx, "k", loader)
+	_, outcome2, err2 := c.GetByKey(ctx, "k", loader)
 	if !errors.Is(err2, smartcache.ErrNotFound) {
 		t.Errorf("Second Get error: got %v, want smartcache.ErrNotFound", err2)
 	}
@@ -230,7 +230,7 @@ func TestGet_PopulateFailure_NonFatal(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	val, outcome, err := c.Get(ctx, "k", loader)
+	val, outcome, err := c.GetByKey(ctx, "k", loader)
 
 	if err != nil {
 		t.Errorf("Get with store Set failure: got error %v, want nil", err)
@@ -256,7 +256,7 @@ func TestEvict_Failure_Surfaced(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := c.Evict(ctx, "k"); err == nil {
+	if err := c.EvictByKey(ctx, "k"); err == nil {
 		t.Fatal("Evict with store Delete failure: expected error, got nil")
 	}
 }
@@ -274,7 +274,7 @@ func TestEvictMany_JoinsErrors(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := c.EvictMany(ctx, "a", "b"); err == nil {
+	if err := c.EvictManyByKey(ctx, "a", "b"); err == nil {
 		t.Fatal("EvictMany with store Delete failure: expected error, got nil")
 	}
 }
@@ -293,7 +293,7 @@ func TestPutValue_ThenHit(t *testing.T) {
 	ctx := context.Background()
 
 	// PutValue a value directly
-	err = c.PutValue(ctx, "k", &sample{N: 9})
+	err = c.PutValueByKey(ctx, "k", &sample{N: 9})
 	if err != nil {
 		t.Fatalf("PutValue failed: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestPutValue_ThenHit(t *testing.T) {
 		panic("loader should not be called")
 	}
 
-	val, outcome, err := c.Get(ctx, "k", loader)
+	val, outcome, err := c.GetByKey(ctx, "k", loader)
 	if err != nil {
 		t.Fatalf("Get after PutValue failed: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestPut_WriterSuccess_ThenHit(t *testing.T) {
 		return &sample{N: 11}, nil
 	}
 
-	val, outcome, err := c.Put(ctx, "k", writer)
+	val, outcome, err := c.PutByKey(ctx, "k", writer)
 	if err != nil {
 		t.Fatalf("Put failed: %v", err)
 	}
@@ -351,7 +351,7 @@ func TestPut_WriterSuccess_ThenHit(t *testing.T) {
 	loader := func(ctx context.Context) (*sample, error) {
 		panic("loader should not be called")
 	}
-	val2, outcome2, err2 := c.Get(ctx, "k", loader)
+	val2, outcome2, err2 := c.GetByKey(ctx, "k", loader)
 	if err2 != nil {
 		t.Fatalf("Get after Put failed: %v", err2)
 	}
@@ -381,7 +381,7 @@ func TestPut_WriterError_PropagatedNotCached(t *testing.T) {
 		return nil, writerErr
 	}
 
-	val, outcome, err := c.Put(ctx, "k", writer)
+	val, outcome, err := c.PutByKey(ctx, "k", writer)
 	if val != nil {
 		t.Errorf("Put value: got %v, want nil", val)
 	}
@@ -398,7 +398,7 @@ func TestPut_WriterError_PropagatedNotCached(t *testing.T) {
 		loaderCalls++
 		return &sample{N: 1}, nil
 	}
-	if _, _, err := c.Get(ctx, "k", loader); err != nil {
+	if _, _, err := c.GetByKey(ctx, "k", loader); err != nil {
 		t.Fatalf("Get after failed Put failed: %v", err)
 	}
 	if loaderCalls != 1 {
@@ -423,7 +423,7 @@ func TestPut_WriterNilValue_ErrNilWrite(t *testing.T) {
 		return nil, nil
 	}
 
-	val, outcome, err := c.Put(ctx, "k", writer)
+	val, outcome, err := c.PutByKey(ctx, "k", writer)
 	if val != nil {
 		t.Errorf("Put value: got %v, want nil", val)
 	}
@@ -439,7 +439,7 @@ func TestPut_WriterNilValue_ErrNilWrite(t *testing.T) {
 		loaderCalls++
 		return &sample{N: 1}, nil
 	}
-	if _, _, err := c.Get(ctx, "k", loader); err != nil {
+	if _, _, err := c.GetByKey(ctx, "k", loader); err != nil {
 		t.Fatalf("Get after nil-write Put failed: %v", err)
 	}
 	if loaderCalls != 1 {
@@ -466,7 +466,7 @@ func TestPut_PopulateFailure_NonFatal(t *testing.T) {
 		return &sample{N: 5}, nil
 	}
 
-	val, outcome, err := c.Put(ctx, "k", writer)
+	val, outcome, err := c.PutByKey(ctx, "k", writer)
 	if err != nil {
 		t.Errorf("Put with store Set failure: got error %v, want nil", err)
 	}
@@ -502,7 +502,7 @@ func TestPut_ConcurrentCalls_NotDeduped(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Go(func() {
-			if _, _, putErr := c.Put(ctx, "same", writer); putErr != nil {
+			if _, _, putErr := c.PutByKey(ctx, "same", writer); putErr != nil {
 				t.Errorf("concurrent Put failed: %v", putErr)
 			}
 		})
@@ -539,7 +539,7 @@ func TestSingleflight_DedupsColdLoads(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Go(func() {
-			if _, _, getErr := c.Get(ctx, "same", loader); getErr != nil {
+			if _, _, getErr := c.GetByKey(ctx, "same", loader); getErr != nil {
 				t.Errorf("concurrent Get failed: %v", getErr)
 			}
 		})
@@ -577,7 +577,7 @@ func TestSingleflight_PopulatesOnce(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Go(func() {
-			if _, _, getErr := c.Get(ctx, "same", loader); getErr != nil {
+			if _, _, getErr := c.GetByKey(ctx, "same", loader); getErr != nil {
 				t.Errorf("concurrent Get failed: %v", getErr)
 			}
 		})
@@ -612,7 +612,7 @@ func TestSingleflight_PopulatesNegativeMarkerOnce(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Go(func() {
-			if _, _, getErr := c.Get(ctx, "missing", loader); !errors.Is(getErr, smartcache.ErrNotFound) {
+			if _, _, getErr := c.GetByKey(ctx, "missing", loader); !errors.Is(getErr, smartcache.ErrNotFound) {
 				t.Errorf("concurrent Get error: got %v, want smartcache.ErrNotFound", getErr)
 			}
 		})
@@ -644,7 +644,7 @@ func TestGet_TransientLoaderError_NotCached(t *testing.T) {
 	ctx := context.Background()
 
 	// First Get: transient error
-	val1, outcome1, err1 := c.Get(ctx, "k", loader)
+	val1, outcome1, err1 := c.GetByKey(ctx, "k", loader)
 	if val1 != nil {
 		t.Errorf("First Get value: got %v, want nil", val1)
 	}
@@ -662,7 +662,7 @@ func TestGet_TransientLoaderError_NotCached(t *testing.T) {
 	}
 
 	// Second Get: should call loader again (not cached)
-	val2, _, err2 := c.Get(ctx, "k", loader)
+	val2, _, err2 := c.GetByKey(ctx, "k", loader)
 	if val2 != nil {
 		t.Errorf("Second Get value: got %v, want nil", val2)
 	}
@@ -671,6 +671,221 @@ func TestGet_TransientLoaderError_NotCached(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Errorf("Second Get calls: got %d, want 2", calls)
+	}
+}
+
+// uniqueKeyedSample is a test type implementing UniqueKeyed.
+type uniqueKeyedSample struct {
+	ID string
+	N  int
+}
+
+func (s uniqueKeyedSample) CacheUniqueKey() string { return s.ID }
+
+// testUniqueKeyedPutValueThenGetByKey verifies PutValue(ctx, val) caches a UniqueKeyed
+// value under its derived key, readable back via GetByKey.
+func testUniqueKeyedPutValueThenGetByKey(t *testing.T) {
+	mgr, err := smartcache.NewManager(memstore.New())
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[uniqueKeyedSample](mgr, "unique-putvalue", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	ctx := context.Background()
+	val := &uniqueKeyedSample{ID: "key1", N: 42}
+
+	if err := c.PutValue(ctx, val); err != nil {
+		t.Fatalf("PutValue failed: %v", err)
+	}
+
+	loader := func(ctx context.Context) (*uniqueKeyedSample, error) {
+		panic("loader should not be called")
+	}
+	got, outcome, err := c.GetByKey(ctx, val.CacheUniqueKey(), loader)
+	if err != nil {
+		t.Fatalf("GetByKey failed: %v", err)
+	}
+	if outcome != smartcache.Hit {
+		t.Errorf("GetByKey outcome: got %v, want Hit", outcome)
+	}
+	if got == nil || got.N != 42 || got.ID != "key1" {
+		t.Errorf("GetByKey value: got %+v, want {ID: key1, N: 42}", got)
+	}
+}
+
+// testUniqueKeyedPutWriterSuccess verifies Put(ctx, writer) runs writer and caches the
+// result under its derived key, readable back via GetByKey.
+func testUniqueKeyedPutWriterSuccess(t *testing.T) {
+	mgr, err := smartcache.NewManager(memstore.New())
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[uniqueKeyedSample](mgr, "unique-put", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	ctx := context.Background()
+	writer := func(ctx context.Context) (*uniqueKeyedSample, error) {
+		return &uniqueKeyedSample{ID: "key2", N: 99}, nil
+	}
+
+	val, outcome, err := c.Put(ctx, writer)
+	if err != nil {
+		t.Fatalf("Put failed: %v", err)
+	}
+	if outcome != smartcache.Written {
+		t.Errorf("Put outcome: got %v, want Written", outcome)
+	}
+	if val == nil || val.N != 99 || val.ID != "key2" {
+		t.Errorf("Put value: got %+v, want {ID: key2, N: 99}", val)
+	}
+
+	loader := func(ctx context.Context) (*uniqueKeyedSample, error) {
+		panic("loader should not be called")
+	}
+	got, outcome, err := c.GetByKey(ctx, val.CacheUniqueKey(), loader)
+	if err != nil {
+		t.Fatalf("GetByKey after Put failed: %v", err)
+	}
+	if outcome != smartcache.Hit {
+		t.Errorf("GetByKey outcome: got %v, want Hit", outcome)
+	}
+	if got == nil || got.N != 99 || got.ID != "key2" {
+		t.Errorf("GetByKey value: got %+v, want {ID: key2, N: 99}", got)
+	}
+}
+
+// testUniqueKeyedEvictRemovesEntry verifies Evict(ctx, val) removes the entry cached
+// under val's derived key.
+func testUniqueKeyedEvictRemovesEntry(t *testing.T) {
+	mgr, err := smartcache.NewManager(memstore.New())
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[uniqueKeyedSample](mgr, "unique-evict", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	ctx := context.Background()
+	val := &uniqueKeyedSample{ID: "key3", N: 77}
+
+	if err := c.PutValue(ctx, val); err != nil {
+		t.Fatalf("PutValue failed: %v", err)
+	}
+	if err := c.Evict(ctx, val); err != nil {
+		t.Fatalf("Evict failed: %v", err)
+	}
+
+	var loaderCalled bool
+	loader := func(ctx context.Context) (*uniqueKeyedSample, error) {
+		loaderCalled = true
+		return nil, smartcache.ErrNotFound
+	}
+	_, _, err = c.GetByKey(ctx, val.CacheUniqueKey(), loader)
+	if !loaderCalled {
+		t.Errorf("Evict did not remove entry: loader was not called")
+	}
+	if !errors.Is(err, smartcache.ErrNotFound) {
+		t.Errorf("GetByKey after Evict: got %v, want ErrNotFound", err)
+	}
+}
+
+// testNotUniqueKeyedPutValueReturnsError verifies PutValue(ctx, val) returns
+// ErrNotUniqueKeyed when T does not implement UniqueKeyed.
+func testNotUniqueKeyedPutValueReturnsError(t *testing.T) {
+	mgr, err := smartcache.NewManager(memstore.New())
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "not-unique", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	ctx := context.Background()
+	val := &sample{N: 42}
+
+	if err := c.PutValue(ctx, val); !errors.Is(err, smartcache.ErrNotUniqueKeyed) {
+		t.Errorf("PutValue: got %v, want ErrNotUniqueKeyed", err)
+	}
+}
+
+// testNotUniqueKeyedPutReturnsError verifies Put(ctx, writer) returns ErrNotUniqueKeyed
+// when T does not implement UniqueKeyed.
+func testNotUniqueKeyedPutReturnsError(t *testing.T) {
+	mgr, err := smartcache.NewManager(memstore.New())
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "not-unique-put", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	ctx := context.Background()
+	writer := func(ctx context.Context) (*sample, error) {
+		return &sample{N: 42}, nil
+	}
+
+	val, outcome, err := c.Put(ctx, writer)
+	if !errors.Is(err, smartcache.ErrNotUniqueKeyed) {
+		t.Errorf("Put: got %v, want ErrNotUniqueKeyed", err)
+	}
+	if val != nil {
+		t.Errorf("Put value: got %v, want nil on error", val)
+	}
+	if outcome != smartcache.Written {
+		t.Errorf("Put outcome: got %v, want Written (attempt before key derivation)", outcome)
+	}
+}
+
+// testNotUniqueKeyedEvictReturnsError verifies Evict(ctx, val) returns ErrNotUniqueKeyed
+// when T does not implement UniqueKeyed.
+func testNotUniqueKeyedEvictReturnsError(t *testing.T) {
+	mgr, err := smartcache.NewManager(memstore.New())
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	c, err := smartcache.Register[sample](mgr, "not-unique-evict", &smartcache.EntityOptions{TTL: ptr(time.Minute)})
+	if err != nil {
+		t.Fatalf("Register failed: %v", err)
+	}
+
+	ctx := context.Background()
+	val := &sample{N: 42}
+
+	if err := c.Evict(ctx, val); !errors.Is(err, smartcache.ErrNotUniqueKeyed) {
+		t.Errorf("Evict: got %v, want ErrNotUniqueKeyed", err)
+	}
+}
+
+// TestValueDerivedMethods_PutAndEvict verifies the new value-derived methods:
+// Put(ctx, writer), PutValue(ctx, val), and Evict(ctx, val) work correctly
+// for types implementing UniqueKeyed, and return ErrNotUniqueKeyed for types
+// that do not implement UniqueKeyed.
+func TestValueDerivedMethods_PutAndEvict(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   func(t *testing.T)
+	}{
+		{name: "UniqueKeyed_PutValue_ThenGetByKey", fn: testUniqueKeyedPutValueThenGetByKey},
+		{name: "UniqueKeyed_Put_WriterSuccess", fn: testUniqueKeyedPutWriterSuccess},
+		{name: "UniqueKeyed_Evict_RemovesEntry", fn: testUniqueKeyedEvictRemovesEntry},
+		{name: "NotUniqueKeyed_PutValue_ReturnsError", fn: testNotUniqueKeyedPutValueReturnsError},
+		{name: "NotUniqueKeyed_Put_ReturnsError", fn: testNotUniqueKeyedPutReturnsError},
+		{name: "NotUniqueKeyed_Evict_ReturnsError", fn: testNotUniqueKeyedEvictReturnsError},
+	}
+
+	for i := range tests {
+		tc := &tests[i]
+		t.Run(tc.name, func(t *testing.T) {
+			tc.fn(t)
+		})
 	}
 }
 

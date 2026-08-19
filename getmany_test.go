@@ -36,10 +36,10 @@ func TestGetMany_AllHits_NoLoad(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := c.PutValue(ctx, "a", &sample{N: 1}); err != nil {
+	if err := c.PutValueByKey(ctx, "a", &sample{N: 1}); err != nil {
 		t.Fatalf("PutValue a failed: %v", err)
 	}
-	if err := c.PutValue(ctx, "b", &sample{N: 2}); err != nil {
+	if err := c.PutValueByKey(ctx, "b", &sample{N: 2}); err != nil {
 		t.Fatalf("PutValue b failed: %v", err)
 	}
 
@@ -48,7 +48,7 @@ func TestGetMany_AllHits_NoLoad(t *testing.T) {
 		return nil, nil
 	}
 
-	out, err := c.GetMany(ctx, []string{"a", "b"}, loadMissing)
+	out, err := c.GetManyByKey(ctx, []string{"a", "b"}, loadMissing)
 	if err != nil {
 		t.Fatalf("GetMany failed: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestGetMany_PartialMiss_OneBatchedLoad(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := c.PutValue(ctx, "a", &sample{N: 1}); err != nil {
+	if err := c.PutValueByKey(ctx, "a", &sample{N: 1}); err != nil {
 		t.Fatalf("PutValue a failed: %v", err)
 	}
 
@@ -86,7 +86,7 @@ func TestGetMany_PartialMiss_OneBatchedLoad(t *testing.T) {
 		return map[string]*sample{"b": {N: 2}, "c": {N: 3}}, nil
 	}
 
-	out, err := c.GetMany(ctx, []string{"a", "b", "c"}, loadMissing)
+	out, err := c.GetManyByKey(ctx, []string{"a", "b", "c"}, loadMissing)
 	if err != nil {
 		t.Fatalf("GetMany failed: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestGetMany_PartialMiss_OneBatchedLoad(t *testing.T) {
 		t.Fatalf("loadMissing should not be called on second GetMany, got missing=%v", missing)
 		return nil, nil
 	}
-	out2, err := c.GetMany(ctx, []string{"a", "b", "c"}, loadMissing2)
+	out2, err := c.GetManyByKey(ctx, []string{"a", "b", "c"}, loadMissing2)
 	if err != nil {
 		t.Fatalf("second GetMany failed: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestGetMany_NegativeCachesNotFound(t *testing.T) {
 		return map[string]*sample{}, nil
 	}
 
-	out, err := c.GetMany(ctx, []string{"missing-id"}, loadMissing)
+	out, err := c.GetManyByKey(ctx, []string{"missing-id"}, loadMissing)
 	if err != nil {
 		t.Fatalf("GetMany failed: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestGetMany_NegativeCachesNotFound(t *testing.T) {
 		t.Fatalf("loadMissing should not be called; missing-id should be a warm negative hit, got missing=%v", missing)
 		return nil, nil
 	}
-	out2, err := c.GetMany(ctx, []string{"missing-id"}, loadMissing2)
+	out2, err := c.GetManyByKey(ctx, []string{"missing-id"}, loadMissing2)
 	if err != nil {
 		t.Fatalf("second GetMany failed: %v", err)
 	}
@@ -178,14 +178,14 @@ func TestGetMany_NFallback_WhenNotBatchStore(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := c.PutValue(ctx, "a", &sample{N: 1}); err != nil {
+	if err := c.PutValueByKey(ctx, "a", &sample{N: 1}); err != nil {
 		t.Fatalf("PutValue failed: %v", err)
 	}
 
 	loadMissing := func(ctx context.Context, missing []string) (map[string]*sample, error) {
 		return map[string]*sample{}, nil
 	}
-	if _, err := c.GetMany(ctx, []string{"a", "b"}, loadMissing); err != nil {
+	if _, err := c.GetManyByKey(ctx, []string{"a", "b"}, loadMissing); err != nil {
 		t.Fatalf("GetMany failed: %v", err)
 	}
 
@@ -219,7 +219,7 @@ func TestGetMany_BatchReadError_TreatedAsMiss(t *testing.T) {
 		return out, nil
 	}
 
-	out, err := c.GetMany(ctx, []string{"a", "b"}, loadMissing)
+	out, err := c.GetManyByKey(ctx, []string{"a", "b"}, loadMissing)
 	if err != nil {
 		t.Fatalf("GetMany should not fail on a batch-read error: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestGetMany_LoadError_Propagates(t *testing.T) {
 		return nil, loadErr
 	}
 
-	out, err := c.GetMany(ctx, []string{"a"}, loadMissing)
+	out, err := c.GetManyByKey(ctx, []string{"a"}, loadMissing)
 	if !errors.Is(err, loadErr) {
 		t.Errorf("GetMany error: got %v, want wrapping %v", err, loadErr)
 	}
@@ -282,7 +282,7 @@ func TestGetMany_CorruptEntry_Reloads(t *testing.T) {
 		return map[string]*sample{"a": {N: 42}}, nil
 	}
 
-	out, err := c.GetMany(ctx, []string{"a"}, loadMissing)
+	out, err := c.GetManyByKey(ctx, []string{"a"}, loadMissing)
 	if err != nil {
 		t.Fatalf("GetMany failed: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestGetMany_Empty(t *testing.T) {
 		return nil, nil
 	}
 
-	out, err := c.GetMany(ctx, nil, loadMissing)
+	out, err := c.GetManyByKey(ctx, nil, loadMissing)
 	if err != nil {
 		t.Fatalf("GetMany(nil) failed: %v", err)
 	}

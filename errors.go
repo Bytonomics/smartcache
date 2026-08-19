@@ -59,4 +59,9 @@ var (
 	// ErrAliasingNotSupported is used in the RegisterAliasGroup panic when the manager's
 	// store does not implement AliasCacheStore.
 	ErrAliasingNotSupported = errors.New("smartcache: store does not implement AliasCacheStore")
+
+	// ErrNotUniqueKeyed is returned by the value-derived methods (Put/PutValue/Evict that take a
+	// value instead of a key) when the cached type T does not implement UniqueKeyed. The *ByKey
+	// variants (GetByKey/PutByKey/PutValueByKey/EvictByKey/EvictManyByKey/GetManyByKey) work for any T.
+	ErrNotUniqueKeyed = errors.New("smartcache: value type does not implement UniqueKeyed (CacheUniqueKey() string)")
 )

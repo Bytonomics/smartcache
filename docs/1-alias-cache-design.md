@@ -198,11 +198,11 @@ type AliasRef struct {
 	Value string
 }
 
-// PrimaryKeyed is implemented by the value type T (or *T) cached in an alias-group cache. It
+// UniqueKeyed is implemented by the value type T (or *T) cached in an alias-group cache. It
 // lets the library learn a value's primary key when rebuilding the group on a GetByAlias
 // read-through miss (Section 12). It returns the primary key VALUE (e.g. "5").
-type PrimaryKeyed interface {
-	CachePrimaryKey() string
+type UniqueKeyed interface {
+	CacheUniqueKey() string
 }
 
 // AliasMode selects the Redis-Cluster slot-placement strategy for an alias-group cache.
@@ -217,7 +217,7 @@ const (
 // AliasOps is the per-(namespace, mode) strategy handle for an alias-group cache. It OWNS all
 // key-math and operation sequencing; Cache[T] delegates to it with logical identifiers (a
 // primary key or an AliasRef, never a pre-built key string) and keeps codec, the negative-marker
-// convention, metrics, singleflight, and PrimaryKeyed for itself. All methods are byte-level. A
+// convention, metrics, singleflight, and UniqueKeyed for itself. All methods are byte-level. A
 // miss (absent, or a Sharded validate-on-read mismatch) is signalled by ErrStoreMiss.
 type AliasOps interface {
 	GetValue(ctx context.Context, primary string) ([]byte, error)
@@ -583,14 +583,14 @@ as the application first needs it — one that runs a writer, one for a value al
   the members index, exactly as a primary `Evict` does; `Put`/`PutValue` on the primary update
   the one shared value, so every alias sees the new value on its next read.
 
-- **`GetByAlias` is read-through, via `PrimaryKeyed`.** On a miss it runs `loader`, exactly like
+- **`GetByAlias` is read-through, via `UniqueKeyed`.** On a miss it runs `loader`, exactly like
   `Get` does — but unlike a primary miss (where the caller already supplied the primary key), an
   alias miss does not by itself reveal the primary key needed to store the value. So the loaded
-  value's type must implement `PrimaryKeyed`:
+  value's type must implement `UniqueKeyed`:
   ```go
-  type PrimaryKeyed interface{ CachePrimaryKey() string }
+  type UniqueKeyed interface{ CacheUniqueKey() string }
   ```
-  `GetByAlias` reads `CachePrimaryKey()` off the freshly-loaded value, then writes the value and
+  `GetByAlias` reads `CacheUniqueKey()` off the freshly-loaded value, then writes the value and
   registers this alias for it — the same rebuild `PutAliased` would perform, done automatically
   on a cold alias read.
 
@@ -676,7 +676,7 @@ plus a best-effort pointer write) differ.
 
 1. `GetByAlias(bc:grp:{user}:email:foo@bar.com)` → resolves the pointer to `bc:{user}:5`, reads
  it → value (or either link gone → `ErrStoreMiss` → treated as a miss).
-2. On a miss: run the caller's loader, read `CachePrimaryKey()` off the result, then
+2. On a miss: run the caller's loader, read `CacheUniqueKey()` off the result, then
  `PutByAlias` to write the value and register this alias — the same rebuild `PutAliased`
  performs, done automatically.
 
@@ -714,13 +714,13 @@ plus a best-effort pointer write) differ.
 | D5  | `AliasCacheStore` optional interface is a **factory**, `AliasGroup(ns, mode) AliasOps`, comma-ok at `RegisterAliasGroup`; `AliasOps`'s method names (`GetValue`/`PutValue`/`EvictByPrimary`/`GetByAlias`/`PutByAlias`/`EvictByAlias`) mirror `CacheStore`'s own verb style | Mirrors the shipped `BatchCacheStore` precedent; keeps `Cache[T]` backend-agnostic and free of any key-building; a factory (not a fixed pre-built-key struct) is what lets one interface serve two slot-placement strategies (D16). |
 | D6  | Hash-tag `{ns}` on **all** keys of an `AliasColocated` entity — value, pointer, members | Co-locates the whole group on one slot → the entire grouped op is one atomic Lua. Price: that entity's values are pinned to one cluster node (no horizontal spread) — this is what D16's `AliasSharded` mode exists to avoid for large/hot entities. Non-aliasing caches keep un-tagged, distributing value keys. |
 | D7  | One jittered TTL per grouped write, applied to every key                            | Prevents desynchronized expiry within a group.                                                              |
-| D8  | Opt-in by dedicated constructor `RegisterAliasGroup` (not a flag); one group per cache; group namespace auto-derived from the cache name; panics if store lacks `AliasCacheStore` OR `T` is not `PrimaryKeyed` | Constructor choice is the opt-in; non-aliasing caches keep the untouched fast path; misconfig crashes at init, not at first alias read. |
+| D8  | Opt-in by dedicated constructor `RegisterAliasGroup` (not a flag); one group per cache; group namespace auto-derived from the cache name; panics if store lacks `AliasCacheStore` OR `T` is not `UniqueKeyed` | Constructor choice is the opt-in; non-aliasing caches keep the untouched fast path; misconfig crashes at init, not at first alias read. |
 | D9  | Bloom filter deferred; pure optimization, no correctness role                       | Lua path is correct alone and handles non-grouped keys gracefully.                                          |
 | D10 | Diff-and-clean stale pointers inside the Lua write (`AliasColocated`; see D18 for `AliasSharded`'s different, lazy approach) | Satisfies the "no leaks / clean all metadata" requirement on reassignment.                                  |
 | D11 | One alias per `PutAliased`/`PutAliasedValue` call; lazy; `PutAliasedValue` is the value-held twin of `PutAliased` (no writer re-run) | Writers don't need to know the full alias set; aliases appear as paths do; avoids a redundant load when the caller already holds the value. |
 | D11a | One alias per field per primary — re-registering a field replaces its old pointer (not additive) | Matches single-valued identity fields (one email, one slug); gives `PutByAlias` a well-defined diff to clean on reassignment (Section 11). |
 | D12 | Alias access is **explicit**, via `AliasRef`-typed methods (`GetByAlias`, `EvictByAlias`) — not by overloading `Get`/`Evict` to accept "any key, primary or alias" | A single string key can't safely distinguish primary from alias if either value contains the field separator; explicit methods have no such ambiguity. `Put`/`PutValue`/`Evict` keep taking only the primary key; there is no `UpdateAliased` because a primary `Put`/`PutValue` already updates every alias's view. |
-| D12a | `GetByAlias` is read-through via `PrimaryKeyed`: on a miss it runs the loader, reads `CachePrimaryKey()` off the result, and rebuilds the group | Requested explicitly so alias reads get the same "miss → load → cache" ergonomics as `Get`, without the caller needing to already know the primary key. |
+| D12a | `GetByAlias` is read-through via `UniqueKeyed`: on a miss it runs the loader, reads `CacheUniqueKey()` off the result, and rebuilds the group | Requested explicitly so alias reads get the same "miss → load → cache" ergonomics as `Get`, without the caller needing to already know the primary key. |
 | D13 | Per-entity group namespace (`{ns}`) → keys globally unique                          | No cross-entity alias collision; the merge/steal problem does not arise.                                    |
 | D14 | All key strings built only in the `internal/keyspace` package                       | Single source of truth for the keyspace, per repo Redis-key-centralization rule; shared by `smartcache`, `memstore`, and `redisstore` so no backend or mode can diverge on key format. |
 | D15 | Single-process (mems4) fully supported via `memstore` mutex                         | No cross-instance concern; strictly the easy case.                                                          |
@@ -745,12 +745,12 @@ behavior gets its own dedicated tests where the two strategies genuinely diverge
 `PutAliased` write → `Get` (primary) and `GetByAlias` (each field) both return the value;
 `EvictByAlias`/`Evict` (primary) both invalidate the whole group; `Put`/`PutValue` on the primary
 is seen through every alias; one-per-field replacement and cross-primary steal cleanup leak
-nothing; `GetByAlias` read-through rebuilds the group via `PrimaryKeyed` on a miss
+nothing; `GetByAlias` read-through rebuilds the group via `UniqueKeyed` on a miss
 (`TestAlias_GetByAlias_ReadThroughRebuild`); `PutAliasedValue`; `GetMany` over primary keys; a
 non-alias-group cache (`Register`) returns the "not an alias group" error
 (`TestAlias_NotAliasGroup_Errors`) — byte-for-byte regression guard for existing non-aliasing
 behavior; `RegisterAliasGroup` panics on a non-`AliasCacheStore` store and on a `T` that is not
-`PrimaryKeyed`.
+`UniqueKeyed`.
 - **`AliasOps` behavior** (`memstore/alias_test.go`, over `memstore`'s `memAliasOps`, both modes
 via `bothModes`): put→resolve→get; alias miss; evict by primary; evict by alias; one-per-field
 replace; cross-primary steal; TTL expiry — proving `memstore` gives identical visible results for
@@ -772,8 +772,8 @@ compare-and-delete pass per returned member (`TestSharded_EvictByPrimary_EvictTh
 strings and hash-tag placement in both the Colocated and Sharded `sharded bool` states, plus a
 consistency check between the prefix helpers and the full-key builders.
 - **`RegisterAliasGroup`** (`manager_test.go`, `alias_test.go`): with a non-`AliasCacheStore`
-store it panics; with a `T` that is not `PrimaryKeyed` it panics; with a valid store and
-`PrimaryKeyed` `T`, and either `AliasMode`, it succeeds.
+store it panics; with a `T` that is not `UniqueKeyed` it panics; with a valid store and
+`UniqueKeyed` `T`, and either `AliasMode`, it succeeds.
 - **Prior art:** `cache_test.go`, `getmany_test.go`, `redisstore_test.go`, `jitter_test.go`.
 
 Unit tests only — no live Redis (fake `RedisConn`), consistent with the module's existing

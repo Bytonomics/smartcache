@@ -19,7 +19,7 @@ Most Go caching options are either a **raw store** (a Redis client, an in-memory
 
 **The core value:**
 
-- **One `Cache[T]` for both directions** — read-through (`Get` + a loader) *and* write-through (`Put` + a writer) in the same type-safe primitive; no `interface{}`, no manual casts.
+- **One `Cache[T]` for both directions** — read-through (`GetByKey` + a loader) *and* write-through (`PutByKey` + a writer) in the same type-safe primitive; no `interface{}`, no manual casts.
 - **Backend-agnostic** — `Cache[T]` talks only to a small `CacheStore` interface. `redisstore` and `memstore` ship in the box; anything else (an LRU, `ristretto`, `bigcache`, your own backend) is a tiny adapter, and swapping backends never changes a call site.
 
 **Correct by default** — the choices that prevent the classic caching bugs are made for you, not left as footguns:
@@ -27,13 +27,13 @@ Most Go caching options are either a **raw store** (a Redis client, an in-memory
 - **Required TTL backstop** — a value can never be cached forever by accident, so a missed or failed invalidation self-heals within a bounded window (opt into no-expiry explicitly with `AllowInfinite`).
 - **Downward-only TTL jitter** — every cached value's effective TTL is shaved down by a small random amount by default, so a batch of keys written together doesn't all expire at the exact same instant and stampede the database together.
 - **Delete-on-write** — writes evict rather than overwrite in place, avoiding the concurrent stale-set race.
-- **A cache failure never fails your operation** — if writing to the backend fails, your `Get`/`Put`/`GetMany` still returns the real value; the cache stays a performance layer, not a hard dependency.
+- **A cache failure never fails your operation** — if writing to the backend fails, your `GetByKey`/`PutByKey`/`GetManyByKey` still returns the real value; the cache stays a performance layer, not a hard dependency.
 - **Cache-stampede protection** — concurrent reads that miss the same key are coalesced into a single load (see below).
 - **Optional negative caching** — briefly remember "not found" so repeated probes of bad or non-existent ids don't reach your database. Off by default (`NegativeTTL` has no default duration — it stays disabled until you explicitly set one).
 
 ### Cache stampede
 
-A **cache stampede** — also called a **thundering herd** (or "dog-piling") — happens when a hot key is missing or has just expired and many concurrent requests all miss it at the same instant, so they *all* fall through to the database at once and can overwhelm it. smartcache prevents this on reads: concurrent `Get` calls for the same key are coalesced so that only one runs your loader and performs the write-back, while the rest wait and share that single result. This is on by default (disable with `DisableSingleflight`). Writes are never coalesced — each `Put`/`PutValue` is a distinct intended write, and `GetMany`'s batched load is not coalesced across concurrent `GetMany` calls either.
+A **cache stampede** — also called a **thundering herd** (or "dog-piling") — happens when a hot key is missing or has just expired and many concurrent requests all miss it at the same instant, so they *all* fall through to the database at once and can overwhelm it. smartcache prevents this on reads: concurrent `GetByKey` calls for the same key are coalesced so that only one runs your loader and performs the write-back, while the rest wait and share that single result. This is on by default (disable with `DisableSingleflight`). Writes are never coalesced — each `PutByKey`/`PutValue` is a distinct intended write, and `GetManyByKey`'s batched load is not coalesced across concurrent `GetManyByKey` calls either.
 
 Background reading: [Cache stampede (Wikipedia)](https://en.wikipedia.org/wiki/Cache_stampede).
 
@@ -41,8 +41,8 @@ Background reading: [Cache stampede (Wikipedia)](https://en.wikipedia.org/wiki/C
 
 - **`Manager` + `Register`** — the only way to build a `Cache[T]`. A `Manager` holds the injected `CacheStore`, a set of default options, and (optionally) an OpenTelemetry metrics exporter; `Register[T]` creates one named `Cache[T]` on it, inheriting the manager's defaults unless you override them for that entity.
 - **`CacheStore` interface** — the injected cache backend (never the application's own database). `memstore` (in-memory) and `redisstore` (go-redis) are provided; bring your own implementation for any other system.
-- **Generic `Cache[T]`** — read-through `Get`/`GetMany` with a loader function; write-through `Put` with a writer function; `PutValue` to cache a value you already hold, with no external write; `Evict` and `EvictMany` for delete-on-write.
-- **`RegisterAliasGroup` + alias groups** — an opt-in second constructor for a value reachable by several lookup keys (id, email, slug, …), where a write or delete through any one of them keeps the rest consistent — pick per-cache slot placement with AliasMode (Colocated vs Sharded) for Redis Cluster — see [`RegisterAliasGroup`](#registeraliasgroup--one-value-many-lookup-keys).
+- **Generic `Cache[T]`** — read-through `GetByKey`/`GetManyByKey` with a loader function; write-through `PutByKey` with a writer function; `PutValue` to cache a value you already hold, with no external write; `EvictByKey` and `EvictManyByKey` for delete-on-write; value-derived `Put`, `PutValue`, and `Evict` methods that derive the cache key from `val.CacheUniqueKey()`.
+- **`RegisterAliasGroup` + alias groups** — an opt-in second constructor for a value reachable by several lookup keys (id, email, slug, …), where a write or delete through any one of them keeps the rest consistent — requires `T` to implement `UniqueKeyed`; pick per-cache slot placement with AliasMode (Colocated vs Sharded) for Redis Cluster — see [`RegisterAliasGroup`](#registeraliasgroup--one-value-many-lookup-keys).
 - **Required positive TTL backstop** — the resolved `TTL` must be positive. Opt in to no expiry via `AllowInfinite: true`.
 - **Downward-only TTL jitter** — both `TTL` and `NegativeTTL` are independently shaved down by a random fraction (default 10%, configurable, 0 disables) so keys written together don't all expire in sync.
 - **Optional negative caching, off by default** — cache "not found" results for a separate duration via `NegativeTTL`. There is no built-in default duration; negative caching only activates once you set `NegativeTTL` to a positive value yourself, so its behavior is never a surprise.
@@ -52,30 +52,31 @@ Background reading: [Cache stampede (Wikipedia)](https://en.wikipedia.org/wiki/C
 
 ## Failure Semantics
 
-- **Populate failures** — if the backend `Set` call fails after a loader runs, `Get` still returns the loaded value and reports `Outcome == LoadedNotCached`. If the backend `Set` call fails after a writer runs, `Put` still returns the written value and reports `Outcome == WrittenNotCached`. `GetMany` applies the same rule per key. Neither the read nor the write fails — only caching the result failed.
-- **Writer failures** — if `writer` returns a non-nil error, `Put` returns that error unchanged and the cache is left untouched. If `writer` returns `(nil, nil)`, `Put` returns `ErrNilWrite` and the cache is left untouched — the cache is never set to a nil value.
-- **`GetMany` load failures** — if `loadMissing` returns a non-nil error, `GetMany` returns that error wrapped, with a nil result map — even the keys that were already cache hits are discarded, matching `Get`'s "a failed load fails the call" behavior.
-- **`GetMany` batch-read failures** — if the backend's batch read fails, every requested key is treated as a miss and loaded via `loadMissing`, exactly as if none of them were cached; the batch-read failure itself never surfaces to the caller.
-- **Evict failures** — if a backend `Delete` call fails, the error is returned to the caller so it can retry or alert.
+- **Populate failures** — if the backend `Set` call fails after a loader runs, `GetByKey` still returns the loaded value and reports `Outcome == LoadedNotCached`. If the backend `Set` call fails after a writer runs, `PutByKey` still returns the written value and reports `Outcome == WrittenNotCached`. `GetManyByKey` applies the same rule per key. Neither the read nor the write fails — only caching the result failed.
+- **Writer failures** — if `writer` returns a non-nil error, `PutByKey` returns that error unchanged and the cache is left untouched. If `writer` returns `(nil, nil)`, `PutByKey` returns `ErrNilWrite` and the cache is left untouched — the cache is never set to a nil value.
+- **`GetManyByKey` load failures** — if `loadMissing` returns a non-nil error, `GetManyByKey` returns that error wrapped, with a nil result map — even the keys that were already cache hits are discarded, matching `GetByKey`'s "a failed load fails the call" behavior.
+- **`GetManyByKey` batch-read failures** — if the backend's batch read fails, every requested key is treated as a miss and loaded via `loadMissing`, exactly as if none of them were cached; the batch-read failure itself never surfaces to the caller.
+- **EvictByKey failures** — if a backend `Delete` call fails, the error is returned to the caller so it can retry or alert.
+- **Value-derived method failures** — when using `Put(ctx, writer)`, `PutValue(ctx, val)`, or `Evict(ctx, val)`, if `T` does not implement `UniqueKeyed`, these methods return `ErrNotUniqueKeyed`.
 - **TTL backstop** — the TTL bounds how long any missed or failed eviction can leave a stale value in the cache.
 
 ## Outcomes
 
-`Get`, `GetMany`, and `Put` each report an `Outcome` so callers can meter cache-hit rate and alert on populate failures. `Get`/`GetMany` never return a `Put`-only outcome, and `Put` never returns a `Get`-only outcome — the two are read-side and write-side vocabularies, not interchangeable.
+`GetByKey`, `GetManyByKey`, and `PutByKey` each report an `Outcome` so callers can meter cache-hit rate and alert on populate failures. `GetByKey`/`GetManyByKey` never return a `PutByKey`-only outcome, and `PutByKey` never returns a `GetByKey`-only outcome — the two are read-side and write-side vocabularies, not interchangeable.
 
-`Get` and `GetMany` return (or, for `GetMany`, meter per key) one of:
+`GetByKey` and `GetManyByKey` return (or, for `GetManyByKey`, meter per key) one of:
 
 - `Hit` — value was served from the cache (and not expired).
-- `Loaded` — a miss occurred, the loader ran, and the value was cached. `GetMany` also reports `Loaded` for a key confirmed not-found in the source of truth (whether or not negative caching is enabled).
+- `Loaded` — a miss occurred, the loader ran, and the value was cached. `GetManyByKey` also reports `Loaded` for a key confirmed not-found in the source of truth (whether or not negative caching is enabled).
 - `LoadedNotCached` — a miss occurred, the loader ran, but the backend `Set` failed; the value is still returned, uncached.
 - `NegativeHit` — a previously cached "not found" was served.
 
-`Put` returns one of:
+`PutByKey` returns one of:
 
 - `Written` — the writer ran and the value it returned was cached.
 - `WrittenNotCached` — the writer ran, but the backend `Set` failed; the value is still returned, uncached.
 
-`PutValue` returns only an `error` — it has no `Outcome`, since it performs no external write to characterize.
+`PutValue`, `Put` (value-derived), and `PutValueByKey` return only an `error` — they have no `Outcome`, since they perform no external write (or no external write separate from value derivation) to characterize.
 
 ## Usage
 
@@ -140,10 +141,10 @@ if err != nil {
 
 `Register` is a **package-level generic function**, not a method on `Manager` — Go methods cannot have type parameters, so `mgr.Register[Team](...)` is not possible. `Manager.Shutdown(ctx)` flushes and stops the OTLP exporter (see [Telemetry](#telemetry--opentelemetry-metrics) below); it is a no-op when `WithOTLP` was never configured.
 
-### `Get` — read-through
+### `GetByKey` — read-through
 
 ```go
-user, outcome, err := users.Get(ctx, "u_123", func(ctx context.Context) (*User, error) {
+user, outcome, err := users.GetByKey(ctx, "u_123", func(ctx context.Context) (*User, error) {
 	return loadUserFromDB(ctx, "u_123") // your own database call
 })
 if err != nil {
@@ -152,7 +153,7 @@ if err != nil {
 fmt.Println(user.Name, outcome)
 ```
 
-`Get` checks the cache for `"u_123"` first. On a miss, it calls the loader function you passed in, caches exactly
+`GetByKey` checks the cache for `"u_123"` first. On a miss, it calls the loader function you passed in, caches exactly
 the value the loader returned, and returns that value. On a hit, the loader is never called at all — this is what
 makes repeat reads for a hot key stop touching your database. `outcome` reports which of these happened: `Hit`,
 `Loaded`, `LoadedNotCached`, or `NegativeHit` — see [Outcomes](#outcomes) for what each one means.
@@ -162,13 +163,13 @@ returns `smartcache.ErrNotFound`. smartcache then reports `Outcome == Loaded` (c
 returns `smartcache.ErrNotFound` to you. Any *other* error from your loader is treated as transient: it is
 returned to you unchanged and is **never** cached. A caller therefore tells the two apart with
 `errors.Is(err, smartcache.ErrNotFound)` — that is a definite not-found; any other non-nil error is a transient
-failure. (`GetMany`'s `loadMissing` signals not-found differently: simply omit the id from the returned map — see
+failure. (`GetManyByKey`'s `loadMissing` signals not-found differently: simply omit the id from the returned map — see
 below.)
 
-### `GetMany` — batch read-through
+### `GetManyByKey` — batch read-through
 
 ```go
-result, err := users.GetMany(ctx, []string{"u_1", "u_2", "u_3"}, func(ctx context.Context, missing []string) (map[string]*User, error) {
+result, err := users.GetManyByKey(ctx, []string{"u_1", "u_2", "u_3"}, func(ctx context.Context, missing []string) (map[string]*User, error) {
 	return loadUsersFromDB(ctx, missing) // your own batched database call — one query for all missing ids
 })
 if err != nil {
@@ -179,19 +180,19 @@ for id, user := range result {
 }
 ```
 
-`GetMany` reads every key from the cache in one batch round trip (a Redis `MGET` when the backend supports it;
-otherwise one `Get` per key). Cached keys never touch your loader at all. Every key that misses is collected and
+`GetManyByKey` reads every key from the cache in one batch round trip (a Redis `MGET` when the backend supports it;
+otherwise one `GetByKey` per key). Cached keys never touch your loader at all. Every key that misses is collected and
 loaded in **exactly one** call to `loadMissing` — never one call per missing key — and each returned value is
 cached individually. An id `loadMissing` does not return (present as a missing key in the input but absent from
 its result map) is treated as confirmed not-found: it is negative-cached when `NegativeTTL > 0`, and is **never**
-present in the returned map either way. Unlike `Get`, `GetMany` is not deduplicated via singleflight — two
-concurrent `GetMany` calls for overlapping missing keys may each call `loadMissing`.
+present in the returned map either way. Unlike `GetByKey`, `GetManyByKey` is not deduplicated via singleflight — two
+concurrent `GetManyByKey` calls for overlapping missing keys may each call `loadMissing`.
 
-### `Put` — write-through
+### `PutByKey` — write-through
 
 ```go
 newUser := &User{ID: "u_456", Name: "Ada Lovelace"}
-saved, outcome, err := users.Put(ctx, "u_456", func(ctx context.Context) (*User, error) {
+saved, outcome, err := users.PutByKey(ctx, "u_456", func(ctx context.Context) (*User, error) {
 	if err := saveUserToDB(ctx, newUser); err != nil { // your own database call
 		return nil, err
 	}
@@ -203,39 +204,59 @@ if err != nil {
 fmt.Println(saved.Name, outcome)
 ```
 
-`Put` is for when the write itself should go through smartcache. It calls your `writer` function to persist the
-value to your own source of truth, then caches exactly the value `writer` returned — so a `Get` for `"u_456"`
-right after this `Put` is served from cache with no database round trip. If `writer` returns a non-nil error,
-`Put` returns that error unchanged and the cache stays untouched. If `writer` returns `(nil, nil)`, `Put` returns
-`ErrNilWrite`, because the cache is never set to a nil value. Unlike `Get`'s loader, `writer` is **never**
-deduplicated: two concurrent `Put` calls for the same key are two distinct writes, and singleflight would
+`PutByKey` is for when the write itself should go through smartcache. It calls your `writer` function to persist the
+value to your own source of truth, then caches exactly the value `writer` returned — so a `GetByKey` for `"u_456"`
+right after this `PutByKey` is served from cache with no database round trip. If `writer` returns a non-nil error,
+`PutByKey` returns that error unchanged and the cache stays untouched. If `writer` returns `(nil, nil)`, `PutByKey` returns
+`ErrNilWrite`, because the cache is never set to a nil value. Unlike `GetByKey`'s loader, `writer` is **never**
+deduplicated: two concurrent `PutByKey` calls for the same key are two distinct writes, and singleflight would
 silently drop one of them. `outcome` is `Written` or `WrittenNotCached` — see [Outcomes](#outcomes).
 
-### `PutValue` — direct cache write
+### `PutValueByKey` — direct cache write by key
 
 ```go
-if err := users.PutValue(ctx, "u_456", newUser); err != nil {
+if err := users.PutValueByKey(ctx, "u_456", newUser); err != nil {
 	panic(err)
 }
 ```
 
-`PutValue` writes a value you already hold straight into the cache — no external write happens, no writer
+`PutValueByKey` writes a value you already hold straight into the cache — no external write happens, no writer
 function is called. Use it when your own code already performed the real write (e.g. you just ran the `INSERT`
-yourself) and you only need the cache updated to match it. `PutValue` returns only an `error`; it has no
+yourself) and you only need the cache updated to match it. `PutValueByKey` returns only an `error`; it has no
 `Outcome`, since there is no external write for one to characterize.
 
-### `Evict` — delete-on-write
+### `EvictByKey` — delete-on-write by key
 
 ```go
-// After updating the user elsewhere (e.g. via Put's writer, or your own code):
-if err := users.Evict(ctx, "u_123"); err != nil {
+// After updating the user elsewhere (e.g. via PutByKey's writer, or your own code):
+if err := users.EvictByKey(ctx, "u_123"); err != nil {
 	panic(err)
 }
 ```
 
-`Evict` removes the cached entry for `"u_123"` right away. Call it after the source of truth changes outside of
-`Put`/`PutValue`, so the next `Get` for that key is a clean read-through instead of serving stale data.
-`EvictMany` does the same for several keys at once, joining any errors.
+`EvictByKey` removes the cached entry for `"u_123"` right away. Call it after the source of truth changes outside of
+`PutByKey`/`PutValueByKey`, so the next `GetByKey` for that key is a clean read-through instead of serving stale data.
+`EvictManyByKey` does the same for several keys at once, joining any errors.
+
+### Key-taking vs value-derived methods
+
+smartcache offers two parallel method families, distinguished by how they derive the cache key:
+
+**Key-taking methods** — explicit cache key parameter:
+- `GetByKey(ctx, key, loader)`, `GetManyByKey(ctx, keys, loadMissing)` — read-through by explicit key
+- `PutByKey(ctx, key, writer)`, `PutValueByKey(ctx, key, val)` — write-through by explicit key
+- `EvictByKey(ctx, key)`, `EvictManyByKey(ctx, keys)` — delete by explicit key
+
+These work for **any** `T`, including slice types, and do not require `T` to implement any interface.
+
+**Value-derived methods** — key derived from `val.CacheUniqueKey()`:
+- `Put(ctx, writer)` — write-through, derives key from result of `writer` (requires `T` implements `UniqueKeyed`)
+- `PutValue(ctx, val)` — direct cache write, derives key from `val` (requires `T` implements `UniqueKeyed`)
+- `Evict(ctx, val)` — delete, derives key from `val` (requires `T` implements `UniqueKeyed`)
+
+These methods **require** `T` to implement `UniqueKeyed { CacheUniqueKey() string }`, and return `ErrNotUniqueKeyed` if it doesn't. Use value-derived methods when the cache key is a natural part of the entity itself (e.g. a user's ID). Use key-taking methods for everything else, including slice types and composite caches.
+
+**Note**: There is **no value-derived `Get`** — reads always use `GetByKey` or `GetByAlias`, because loading a value from an external source requires the key upfront to perform the load.
 
 ### `RegisterAliasGroup` — one value, many lookup keys
 
@@ -246,7 +267,7 @@ type User struct {
 	Email string
 }
 
-func (u User) CachePrimaryKey() string { return u.ID }
+func (u User) CacheUniqueKey() string { return u.ID }
 
 users, err := smartcache.RegisterAliasGroup[User](mgr, "user", &smartcache.EntityOptions{TTL: &ttl})
 if err != nil {
@@ -254,12 +275,12 @@ if err != nil {
 }
 ```
 
-`RegisterAliasGroup` is `Register`'s alias-aware counterpart: it builds a `Cache[T]` whose one cached value can
+`RegisterAliasGroup` is an alias-aware cache constructor: it builds a `Cache[T]` whose one cached value can
 be reachable by several lookup keys — e.g. a user by id, by email, and by slug — where writing or deleting
-through **any** key keeps the rest consistent. `User` must implement `PrimaryKeyed` (one method,
-`CachePrimaryKey() string`, returning its own primary key); `RegisterAliasGroup` panics at startup — not at
+through **any** key keeps the rest consistent. `User` must implement `UniqueKeyed` (one method,
+`CacheUniqueKey() string`, returning its own primary cache key; the key may be composite, e.g. `"provider:subscriptionID"`); `RegisterAliasGroup` panics at startup — not at
 first use — if `User` doesn't implement it, or if the injected `CacheStore` doesn't support alias groups. Both
-bundled stores, `memstore` and `redisstore`, support alias groups.
+bundled stores, `memstore` and `redisstore`, support alias groups. Plain `Register` does **not** require `UniqueKeyed`, so slice types and other composites can be cached with `Register`.
 
 ### `PutAliased` / `PutAliasedValue` — register an alias
 
@@ -270,8 +291,8 @@ _, _, err = users.PutAliased(ctx, "u_123", smartcache.AliasRef{Field: "email", V
 	})
 ```
 
-`PutAliased` is `Put`'s alias-aware counterpart — it runs your writer and registers the given alias for the
-result, so a later `GetByAlias` finds it. `PutAliasedValue` is `PutValue`'s counterpart: it registers an alias
+`PutAliased` is `PutByKey`'s alias-aware counterpart — it runs your writer and registers the given alias for the
+result, so a later `GetByAlias` finds it. `PutAliasedValue` is `PutValueByKey`'s counterpart: it registers an alias
 for a value you already hold, with no writer call. Call either once per alias, as your code first needs each
 lookup path. A field holds at most one value per record: registering `email` again for the same primary
 replaces the old one, and if that email was already registered to a *different* primary, it is moved rather
@@ -286,9 +307,9 @@ user, outcome, err := users.GetByAlias(ctx, smartcache.AliasRef{Field: "email", 
 	})
 ```
 
-`GetByAlias` is `Get`'s alias-aware counterpart. On a hit it resolves the alias straight to the value, same as
-`Get`. On a miss it runs your loader, reads the loaded value's `CachePrimaryKey()`, and registers this alias for
-it automatically — so a first-ever login by email warms the cache exactly like a first `Get` by id would.
+`GetByAlias` is `GetByKey`'s alias-aware counterpart. On a hit it resolves the alias straight to the value, same as
+`GetByKey`. On a miss it runs your loader, reads the loaded value's `CacheUniqueKey()`, and registers this alias for
+it automatically — so a first-ever login by email warms the cache exactly like a first `GetByKey` by id would.
 
 ### `EvictByAlias` — delete-on-write by alias
 
@@ -298,9 +319,9 @@ if err := users.EvictByAlias(ctx, smartcache.AliasRef{Field: "email", Value: "ad
 }
 ```
 
-`EvictByAlias` is `Evict`'s alias-aware counterpart: deleting through an alias removes the value and **every**
+`EvictByAlias` is `EvictByKey`'s alias-aware counterpart: deleting through an alias removes the value and **every**
 alias for it, exactly as deleting through the primary key does — so no lookup path is left pointing at stale or
-deleted data. There is no separate "update by alias" method: a primary `Put`/`PutValue` already updates every
+deleted data. There is no separate "update by alias" method: a primary `PutByKey`/`PutValueByKey` already updates every
 alias's view.
 
 ### Slot placement: `AliasColocated` vs `AliasSharded`
@@ -368,8 +389,8 @@ flowchart LR
 ```go
 fraction := 0.10 // default; 0 disables jitter for this cache
 users, err := smartcache.Register[User](mgr, "user", &smartcache.EntityOptions{
-	TTL:            &ttl,
-	JitterFraction: &fraction,
+	TTL:             &ttl,
+	JitterFraction:  &fraction,
 })
 ```
 
@@ -450,8 +471,8 @@ Pointer fields; `nil` inherits the manager default, non-nil overrides it.
 
 ## Examples
 
-Runnable, end-to-end examples live in [`examples/`](./examples), demonstrating every method above — `Get` (miss
-then hit), negative caching, `PutValue`, `Put`, `GetMany`, and `Evict` — against both backends:
+Runnable, end-to-end examples live in [`examples/`](./examples), demonstrating every method above — `GetByKey` (miss
+then hit), negative caching, `PutValueByKey`, `PutByKey`, `GetManyByKey`, and `EvictByKey` — against both backends:
 
 ```bash
 cd examples
@@ -474,10 +495,10 @@ The backend is an interface, so any store — or a fake, for tests — can repla
 
 ### Shared values under singleflight
 
-When singleflight is enabled (the default), a `Get` call that returns `Loaded` or `LoadedNotCached` may hand back
+When singleflight is enabled (the default), a `GetByKey` call that returns `Loaded` or `LoadedNotCached` may hand back
 the exact same `*T` given to every other concurrent caller deduped onto that same loader call — this is
 `singleflight.Do`'s own contract: all duplicate callers receive the one result the leader produced. Treat a
-`Loaded`/`LoadedNotCached` result as read-only; copy it before mutating. A `Hit` result is different: `Get`
+`Loaded`/`LoadedNotCached` result as read-only; copy it before mutating. A `Hit` result is different: `GetByKey`
 unmarshals a fresh value from the cache on every call, so it is never shared with another caller.
 
 ### The `CacheStore` interface
@@ -500,7 +521,7 @@ type CacheStore interface {
 `Cache[T]` owns all serialization — `CacheStore` only ever sees raw bytes, never the cached type `T`. Pass your
 implementation to `smartcache.NewManager(store, ...)` in place of `memstore.New()` or `redisstore.New(rdb)`.
 
-Optionally, also implement `BatchCacheStore` (embeds `CacheStore` and adds one `GetMany(ctx, keys) (map[string][]byte, error)` method) so `Cache[T].GetMany` can read several keys in a single round trip instead of falling back to one `Get` call per key. `redisstore` implements it via Redis `MGET`; `memstore` implements it with an in-process loop.
+Optionally, also implement `BatchCacheStore` (embeds `CacheStore` and adds one `GetMany(ctx, keys) (map[string][]byte, error)` method) so `Cache[T].GetManyByKey` can read several keys in a single round trip instead of falling back to one `GetByKey` call per key. `redisstore` implements it via Redis `MGET`; `memstore` implements it with an in-process loop.
 
 ### `AliasCacheStore` — backing `RegisterAliasGroup`
 
@@ -572,29 +593,30 @@ small adapter type that implements `CacheStore` by calling into that library —
 
 ## Outcome reference
 
-`Get`, `GetMany`, and `Put` return an `Outcome` (an `int` enum with a `String()` method) describing how the call
-was served. `Get`/`GetMany` use the read-side values; `Put` uses the write-side values; the two never mix.
+`GetByKey`, `GetManyByKey`, and `PutByKey` return an `Outcome` (an `int` enum with a `String()` method) describing how the call
+was served. `GetByKey`/`GetManyByKey` use the read-side values; `PutByKey` uses the write-side values; the two never mix.
 
 | Outcome | Reported by | Meaning |
 |---|---|---|
-| `Hit` | `Get`, `GetMany` | Served from the cache (present and not expired). |
-| `Loaded` | `Get`, `GetMany` | A miss occurred, the loader ran, and the value was cached. `GetMany` also reports `Loaded` for a key confirmed not-found in the source. |
-| `LoadedNotCached` | `Get`, `GetMany` | A miss occurred and the loader ran, but the backend `Set` failed; the value is still returned, uncached. |
-| `NegativeHit` | `Get`, `GetMany` | A previously cached "not found" was served. |
-| `Written` | `Put` | The writer ran and the value it returned was cached. |
-| `WrittenNotCached` | `Put` | The writer ran, but the backend `Set` failed; the value is still returned, uncached. |
+| `Hit` | `GetByKey`, `GetManyByKey` | Served from the cache (present and not expired). |
+| `Loaded` | `GetByKey`, `GetManyByKey` | A miss occurred, the loader ran, and the value was cached. `GetManyByKey` also reports `Loaded` for a key confirmed not-found in the source. |
+| `LoadedNotCached` | `GetByKey`, `GetManyByKey` | A miss occurred and the loader ran, but the backend `Set` failed; the value is still returned, uncached. |
+| `NegativeHit` | `GetByKey`, `GetManyByKey` | A previously cached "not found" was served. |
+| `Written` | `PutByKey` | The writer ran and the value it returned was cached. |
+| `WrittenNotCached` | `PutByKey` | The writer ran, but the backend `Set` failed; the value is still returned, uncached. |
 
-`PutValue`, `Evict`, and `EvictMany` return only an `error` — they have no `Outcome`.
+`PutValueByKey`, `Put`, `PutValue`, `EvictByKey`, and `EvictManyByKey` return only an `error` — they have no `Outcome`.
 
 ## Error reference
 
-All sentinels are exported from the `smartcache` package; check them with `errors.Is`. `ErrPointerType` is the
-only one that **panics** (a programming error caught at construction) rather than being returned.
+All sentinels are exported from the `smartcache` package; check them with `errors.Is`. `ErrPointerType` and `ErrAliasingNotSupported` are the
+only ones that **panic** (programming errors caught at construction) rather than being returned.
 
 | Sentinel | Raised by | When |
 |---|---|---|
-| `ErrNotFound` | `Get` / `GetMany` return it; your loader returns it | A cacheable "not found". Your loader returns it to mark a not-found (this is what enables negative caching); `Get` returns it to you. Detect with `errors.Is(err, smartcache.ErrNotFound)`. |
-| `ErrNilWrite` | `Put` (returned) | The writer returned `(nil, nil)`; the cache is never set to a nil value. |
+| `ErrNotFound` | `GetByKey` / `GetManyByKey` return it; your loader returns it | A cacheable "not found". Your loader returns it to mark a not-found (this is what enables negative caching); `GetByKey` returns it to you. Detect with `errors.Is(err, smartcache.ErrNotFound)`. |
+| `ErrNilWrite` | `PutByKey` (returned) | The writer returned `(nil, nil)`; the cache is never set to a nil value. |
+| `ErrNotUniqueKeyed` | `Put` / `PutValue` / `Evict` (returned) | `T` does not implement `UniqueKeyed`, but a value-derived method was called. |
 | `ErrInvalidTTL` | `Register` (returned) | The resolved `TTL <= 0` and `AllowInfinite` is false. |
 | `ErrInvalidJitterFraction` | `Register` (returned) | The resolved jitter fraction is outside `[0, 1)`. |
 | `ErrEmptyName` | `Register` (returned) | The cache name is empty. |

@@ -93,7 +93,7 @@ func TestRegister_DefaultPrefixFromName(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := c.PutValue(ctx, "42", &sample{N: 1}); err != nil {
+	if err := c.PutValueByKey(ctx, "42", &sample{N: 1}); err != nil {
 		t.Fatalf("PutValue failed: %v", err)
 	}
 	if len(store.setKeys) == 0 || store.setKeys[len(store.setKeys)-1] != "bc:user:42" {
@@ -115,7 +115,7 @@ func TestRegister_PrefixOverride(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := c.PutValue(ctx, "42", &sample{N: 1}); err != nil {
+	if err := c.PutValueByKey(ctx, "42", &sample{N: 1}); err != nil {
 		t.Fatalf("PutValue failed: %v", err)
 	}
 	if len(store.setKeys) == 0 || store.setKeys[len(store.setKeys)-1] != "bc:custom:42" {
@@ -153,7 +153,7 @@ func TestRegister_InheritVsOverride(t *testing.T) {
 		t.Fatalf("Register(inherited) failed: %v", err)
 	}
 	ctx := context.Background()
-	if err := inherited.PutValue(ctx, "k", &sample{N: 1}); err != nil {
+	if err := inherited.PutValueByKey(ctx, "k", &sample{N: 1}); err != nil {
 		t.Fatalf("PutValue failed: %v", err)
 	}
 	if got := store.lastTTL(); got != time.Hour {
@@ -164,7 +164,7 @@ func TestRegister_InheritVsOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Register(overridden) failed: %v", err)
 	}
-	if err := overridden.PutValue(ctx, "k", &sample{N: 1}); err != nil {
+	if err := overridden.PutValueByKey(ctx, "k", &sample{N: 1}); err != nil {
 		t.Fatalf("PutValue failed: %v", err)
 	}
 	if got := store.lastTTL(); got != 30*time.Minute {
@@ -250,7 +250,7 @@ func TestRegister_CodecOverride(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := c.PutValue(ctx, "k", &sample{N: 42}); err != nil {
+	if err := c.PutValueByKey(ctx, "k", &sample{N: 42}); err != nil {
 		t.Fatalf("PutValue failed: %v", err)
 	}
 	if codec.calls == 0 {
@@ -260,7 +260,7 @@ func TestRegister_CodecOverride(t *testing.T) {
 	loader := func(ctx context.Context) (*sample, error) {
 		panic("loader should not be called")
 	}
-	val, outcome, err := c.Get(ctx, "k", loader)
+	val, outcome, err := c.GetByKey(ctx, "k", loader)
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestGet_DisableSingleflight_StillCorrect(t *testing.T) {
 		return &sample{N: 7}, nil
 	}
 
-	val1, outcome1, err1 := c.Get(ctx, "k", loader)
+	val1, outcome1, err1 := c.GetByKey(ctx, "k", loader)
 	if err1 != nil {
 		t.Fatalf("first Get failed: %v", err1)
 	}
@@ -306,7 +306,7 @@ func TestGet_DisableSingleflight_StillCorrect(t *testing.T) {
 		t.Errorf("first Get outcome: got %v, want Loaded", outcome1)
 	}
 
-	val2, outcome2, err2 := c.Get(ctx, "k", loader)
+	val2, outcome2, err2 := c.GetByKey(ctx, "k", loader)
 	if err2 != nil {
 		t.Fatalf("second Get failed: %v", err2)
 	}

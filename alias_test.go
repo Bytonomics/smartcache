@@ -10,14 +10,14 @@ import (
 	"github.com/Bytonomics/smartcache/memstore"
 )
 
-// aliasUser is a PrimaryKeyed test value; its primary key is ID.
+// aliasUser is a UniqueKeyed test value; its unique key is ID.
 type aliasUser struct {
 	ID    string
 	Name  string
 	Email string
 }
 
-func (u aliasUser) CachePrimaryKey() string { return u.ID }
+func (u aliasUser) CacheUniqueKey() string { return u.ID }
 
 func newAliasCache(t *testing.T, mode smartcache.AliasMode) *smartcache.Cache[aliasUser] {
 	t.Helper()
@@ -105,7 +105,7 @@ func TestAlias_PutAndReadByPrimaryAndAlias(t *testing.T) {
 		if _, _, err := c.PutAliased(ctx, "5", smartcache.AliasRef{Field: "email", Value: "ada@x.com"}, writerUser(&aliasUser{ID: "5", Name: "Ada"})); err != nil {
 			t.Fatalf("PutAliased: %v", err)
 		}
-		if got, oc, err := c.Get(ctx, "5", failLoaderUser(t)); err != nil || oc != smartcache.Hit || got.Name != "Ada" {
+		if got, oc, err := c.GetByKey(ctx, "5", failLoaderUser(t)); err != nil || oc != smartcache.Hit || got.Name != "Ada" {
 			t.Fatalf("Get primary: %+v oc=%v err=%v", got, oc, err)
 		}
 		if got, oc, err := c.GetByAlias(ctx, smartcache.AliasRef{Field: "email", Value: "ada@x.com"}, failLoaderUser(t)); err != nil || oc != smartcache.Hit || got.Name != "Ada" {
@@ -126,7 +126,7 @@ func TestAlias_EvictByAlias_Cascades(t *testing.T) {
 		if err := c.EvictByAlias(ctx, smartcache.AliasRef{Field: "email", Value: "ada@x.com"}); err != nil {
 			t.Fatalf("EvictByAlias: %v", err)
 		}
-		if _, _, err := c.Get(ctx, "5", notFoundLoader); !errors.Is(err, smartcache.ErrNotFound) {
+		if _, _, err := c.GetByKey(ctx, "5", notFoundLoader); !errors.Is(err, smartcache.ErrNotFound) {
 			t.Error("primary must miss")
 		}
 		if _, _, err := c.GetByAlias(ctx, smartcache.AliasRef{Field: "slug", Value: "ada"}, notFoundLoader); !errors.Is(err, smartcache.ErrNotFound) {
@@ -141,7 +141,7 @@ func TestAlias_EvictPrimary_Cascades(t *testing.T) {
 		if _, _, err := c.PutAliased(ctx, "5", smartcache.AliasRef{Field: "email", Value: "ada@x.com"}, writerUser(&aliasUser{ID: "5", Name: "Ada"})); err != nil {
 			t.Fatalf("PutAliased: %v", err)
 		}
-		if err := c.Evict(ctx, "5"); err != nil {
+		if err := c.EvictByKey(ctx, "5"); err != nil {
 			t.Fatalf("Evict: %v", err)
 		}
 		if _, _, err := c.GetByAlias(ctx, smartcache.AliasRef{Field: "email", Value: "ada@x.com"}, notFoundLoader); !errors.Is(err, smartcache.ErrNotFound) {
@@ -180,7 +180,7 @@ func TestAlias_CrossPrimarySteal(t *testing.T) {
 		if got, _, err := c.GetByAlias(ctx, smartcache.AliasRef{Field: "email", Value: "shared@x.com"}, failLoaderUser(t)); err != nil || got.ID != "9" {
 			t.Fatalf("email must resolve to 9: %+v err=%v", got, err)
 		}
-		if err := c.Evict(ctx, "5"); err != nil {
+		if err := c.EvictByKey(ctx, "5"); err != nil {
 			t.Fatalf("Evict 5: %v", err)
 		}
 		if got, _, err := c.GetByAlias(ctx, smartcache.AliasRef{Field: "email", Value: "shared@x.com"}, failLoaderUser(t)); err != nil || got.ID != "9" {
@@ -203,7 +203,7 @@ func TestAlias_GetByAlias_ReadThroughRebuild(t *testing.T) {
 		if got, oc, err := c.GetByAlias(ctx, smartcache.AliasRef{Field: "email", Value: "grace@x.com"}, failLoaderUser(t)); err != nil || oc != smartcache.Hit || got.ID != "7" {
 			t.Fatalf("warm GetByAlias: %+v oc=%v err=%v", got, oc, err)
 		}
-		if _, oc, err := c.Get(ctx, "7", failLoaderUser(t)); err != nil || oc != smartcache.Hit {
+		if _, oc, err := c.GetByKey(ctx, "7", failLoaderUser(t)); err != nil || oc != smartcache.Hit {
 			t.Fatalf("primary populated: oc=%v err=%v", oc, err)
 		}
 		if calls != 1 {
@@ -236,7 +236,7 @@ func TestAlias_GetMany_PrimaryKeys(t *testing.T) {
 
 		var loadCalls int
 		var loadedMissing []string
-		got, err := c.GetMany(ctx, []string{"5", "9", "404"}, getMany404Loader(&loadCalls, &loadedMissing))
+		got, err := c.GetManyByKey(ctx, []string{"5", "9", "404"}, getMany404Loader(&loadCalls, &loadedMissing))
 		if err != nil {
 			t.Fatalf("GetMany: %v", err)
 		}
@@ -250,7 +250,7 @@ func TestAlias_GetMany_PrimaryKeys(t *testing.T) {
 
 		// The loaded 404 was populated back through the alias store, so a second GetMany serves it
 		// from cache without loading.
-		got2, err := c.GetMany(ctx, []string{"404"}, failGetMany(t))
+		got2, err := c.GetManyByKey(ctx, []string{"404"}, failGetMany(t))
 		if err != nil {
 			t.Fatalf("second GetMany: %v", err)
 		}
@@ -297,14 +297,14 @@ func TestAlias_RegisterAliasGroup_PanicsWhenStoreNotAlias(t *testing.T) {
 	}
 }
 
-func TestAlias_RegisterAliasGroup_PanicsWhenTNotPrimaryKeyed(t *testing.T) {
+func TestAlias_RegisterAliasGroup_PanicsWhenTNotUniqueKeyed(t *testing.T) {
 	mgr, err := smartcache.NewManager(memstore.New())
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
 	defer func() {
 		if r := recover(); r == nil {
-			t.Error("expected panic when T is not PrimaryKeyed")
+			t.Error("expected panic when T is not UniqueKeyed")
 		}
 	}()
 	if _, err := smartcache.RegisterAliasGroup[sample](mgr, "sample", &smartcache.EntityOptions{TTL: ptr(time.Minute)}); err != nil {

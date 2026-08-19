@@ -83,7 +83,7 @@ func main() {
 	fmt.Println("The cache has no entry for this key, so Get calls the loader you passed in —")
 	fmt.Println("simulating a real database read. The loaded value is then written to Redis, over")
 	fmt.Println("the network, so the next lookup for the same key can skip the database entirely.")
-	user, outcome, err := users.Get(ctx, "u_1", loader)
+	user, outcome, err := users.GetByKey(ctx, "u_1", loader)
 	must(err)
 	fmt.Printf("Result: %+v\n", *user)
 	fmt.Printf("Outcome: %s  (fetched from the source and written to Redis for next time)\n\n", outcome)
@@ -91,7 +91,7 @@ func main() {
 	fmt.Println("=== Step 2: Second Get for \"u_1\" (same key, right after Step 1) ===")
 	fmt.Println("The value is already sitting in Redis, so the loader is NOT called — notice there")
 	fmt.Println("is no [DB] line below. This round trip only talks to Redis, not your database.")
-	user, outcome, err = users.Get(ctx, "u_1", loader)
+	user, outcome, err = users.GetByKey(ctx, "u_1", loader)
 	must(err)
 	fmt.Printf("Result: %+v\n", *user)
 	fmt.Printf("Outcome: %s  (served entirely from Redis, no database round trip)\n\n", outcome)
@@ -101,7 +101,7 @@ func main() {
 	fmt.Println("to 30s, smartcache also writes this \"not found\" result to Redis — so repeated")
 	fmt.Println("lookups of the same missing id (a common source of cache-penetration load) skip")
 	fmt.Println("the database too, for as long as the negative entry stays valid.")
-	_, outcome, err = users.Get(ctx, "u_404", func(ctx context.Context) (*User, error) {
+	_, outcome, err = users.GetByKey(ctx, "u_404", func(ctx context.Context) (*User, error) {
 		return loadUserFromDB(ctx, "u_404")
 	})
 	fmt.Printf("Result: err=%v\n", err)
@@ -112,8 +112,8 @@ func main() {
 	fmt.Println("PutValue is for when you already hold the fresh value — e.g. right after your own")
 	fmt.Println("code just inserted it into the database — and want to warm Redis immediately")
 	fmt.Println("instead of waiting for the next Get to trigger a load.")
-	must(users.PutValue(ctx, "u_2", &User{ID: "u_2", Name: "Grace Hopper"}))
-	user, outcome, err = users.Get(ctx, "u_2", loader)
+	must(users.PutValueByKey(ctx, "u_2", &User{ID: "u_2", Name: "Grace Hopper"}))
+	user, outcome, err = users.GetByKey(ctx, "u_2", loader)
 	must(err)
 	fmt.Printf("Result: %+v\n", *user)
 	fmt.Printf("Outcome: %s  (served from what PutValue stored; the loader above was never invoked)\n\n", outcome)
@@ -125,14 +125,14 @@ func main() {
 	fmt.Println("every Put call performs its own write, since dropping a concurrent write would")
 	fmt.Println("silently lose data.")
 	newUser := &User{ID: "u_3", Name: "Katherine Johnson"}
-	_, outcome, err = users.Put(ctx, "u_3", func(_ context.Context) (*User, error) {
+	_, outcome, err = users.PutByKey(ctx, "u_3", func(_ context.Context) (*User, error) {
 		fmt.Printf("  [DB] writing %s...\n", newUser.ID)
 		return newUser, nil
 	})
 	must(err)
 	fmt.Printf("Outcome: %s  (writer ran and the value it returned was cached in Redis)\n\n", outcome)
 
-	user, outcome, err = users.Get(ctx, "u_3", loader)
+	user, outcome, err = users.GetByKey(ctx, "u_3", loader)
 	must(err)
 	fmt.Printf("Result: %+v\n", *user)
 	fmt.Printf("Outcome: %s  (served from what Put cached; the loader above was never invoked)\n\n", outcome)
@@ -142,8 +142,8 @@ func main() {
 	fmt.Println("delete-on-write path, used after a write to your source of truth so stale data")
 	fmt.Println("is never served. The next Get for this key is therefore a cold read again, just")
 	fmt.Println("like Step 1.")
-	must(users.Evict(ctx, "u_1"))
-	user, outcome, err = users.Get(ctx, "u_1", loader)
+	must(users.EvictByKey(ctx, "u_1"))
+	user, outcome, err = users.GetByKey(ctx, "u_1", loader)
 	must(err)
 	fmt.Printf("Result: %+v\n", *user)
 	fmt.Printf("Outcome: %s  (Evict forced this back to a cache miss)\n\n", outcome)
@@ -154,7 +154,7 @@ func main() {
 	fmt.Println("loaded in ONE call to your batch loader (not one call per key), then each result")
 	fmt.Println("is written back to Redis individually.")
 	loadManyCalls := 0
-	got, err := users.GetMany(ctx, []string{"u_1", "u_5", "u_404"}, func(ctx context.Context, missing []string) (map[string]*User, error) {
+	got, err := users.GetManyByKey(ctx, []string{"u_1", "u_5", "u_404"}, func(ctx context.Context, missing []string) (map[string]*User, error) {
 		loadManyCalls++
 		fmt.Printf("  [DB] batch-loading %v...\n", missing)
 		out := make(map[string]*User, len(missing))
@@ -179,7 +179,7 @@ func main() {
 	fmt.Println("=== Step 8: Cleanup ===")
 	fmt.Println("Removing this example's keys from Redis so re-running it starts from a clean")
 	fmt.Println("slate — real applications rely on TTL expiry instead of doing this manually.")
-	must(users.EvictMany(ctx, "u_1", "u_2", "u_3", "u_5", "u_404"))
+	must(users.EvictManyByKey(ctx, "u_1", "u_2", "u_3", "u_5", "u_404"))
 
 	must(mgr.Shutdown(ctx))
 }
