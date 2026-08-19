@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/Bytonomics/smartcache/internal/keyspace"
 )
 
 // negativeMarker is stored in place of a real value to negative-cache "not found".
@@ -112,15 +114,25 @@ type Cache[T any] struct {
 	codec          Codec
 	group          *singleflight.Group
 	jitterFraction float64
-	metrics        *cacheMetrics   // nil => telemetry disabled
-	aliasStore     AliasCacheStore // non-nil only for alias-group caches (RegisterAliasGroup)
-	isAliasGroup   bool            // true for caches created via RegisterAliasGroup
+	metrics        *cacheMetrics // nil => telemetry disabled
+	aliasOps       AliasOps      // non-nil only for alias-group caches (RegisterAliasGroup)
+	isAliasGroup   bool          // true for caches created via RegisterAliasGroup
 }
 
-// fullKey builds the value key for this cache via the central keyspace builder (keyspace.go).
-// Alias-group caches hash-tag the namespace ({ns}); non-alias caches use plain bc:<ns>:<key>.
+// fullKey builds a NON-alias cache value key: bc:<ns>:<key>. Alias-group caches never call this
+// (their keys are owned by the AliasOps strategy handle); they route reads/writes via getValue/
+// setValue/deleteValue instead.
 func (c *Cache[T]) fullKey(key string) string {
-	return valueKey(c.opts.Prefix, key, c.isAliasGroup)
+	return keyspace.NonAliasKey(c.opts.Prefix, key)
+}
+
+// getValue reads a value for a key. Alias-group caches resolve via the AliasOps handle; normal
+// caches do a plain store Get on the full key.
+func (c *Cache[T]) getValue(ctx context.Context, key string) ([]byte, error) {
+	if c.isAliasGroup {
+		return c.aliasOps.GetValue(ctx, key)
+	}
+	return c.store.Get(ctx, c.fullKey(key))
 }
 
 // positiveTTL returns the jittered positive TTL a value is stored under. When
@@ -149,9 +161,7 @@ func (c *Cache[T]) negativeTTL() time.Duration {
 // before mutating. A Hit result is always freshly unmarshaled per call and
 // is never shared with another caller.
 func (c *Cache[T]) Get(ctx context.Context, key string, loader Loader[T]) (*T, Outcome, error) {
-	k := c.fullKey(key)
-
-	raw, getErr := c.store.Get(ctx, k)
+	raw, getErr := c.getValue(ctx, key)
 	if getErr == nil {
 		if bytes.Equal(raw, negativeMarker) {
 			c.metrics.recordOutcome(ctx, NegativeHit)
@@ -214,7 +224,7 @@ func (c *Cache[T]) Get(ctx context.Context, key string, loader Loader[T]) (*T, O
 	var res any
 	var lerr error
 	if c.group != nil {
-		res, lerr, _ = c.group.Do(k, doLoad) //nolint:not-an-error -- discards singleflight's "shared" bool, which this code has no use for
+		res, lerr, _ = c.group.Do(key, doLoad) //nolint:not-an-error -- discards singleflight's shared bool
 	} else {
 		res, lerr = doLoad()
 	}
@@ -321,15 +331,12 @@ func (c *Cache[T]) GetMany(
 	if len(keys) == 0 {
 		return map[string]*T{}, nil
 	}
-
-	fullToOrig, fullKeys := c.dedupKeys(keys)
-	raw := c.readManyRaw(ctx, fullKeys)
-	result, missing := c.splitHitsAndMisses(ctx, fullKeys, fullToOrig, raw)
-
+	uniq := c.dedupKeys(keys)
+	raw := c.readManyRaw(ctx, uniq)
+	result, missing := c.splitHitsAndMisses(ctx, uniq, raw)
 	if len(missing) == 0 {
 		return result, nil
 	}
-
 	start := time.Now()
 	loaded, lErr := loadMissing(ctx, missing)
 	c.metrics.recordLoadLatencySeconds(ctx, time.Since(start).Seconds())
@@ -337,63 +344,62 @@ func (c *Cache[T]) GetMany(
 		c.metrics.recordLoadError(ctx)
 		return nil, fmt.Errorf("smartcache: GetMany load: %w", lErr)
 	}
-
 	c.populateLoaded(ctx, missing, loaded, result)
 	return result, nil
 }
 
-// dedupKeys maps each unique key to its full (prefixed) form, returning both
-// the lookup map and the ordered list of unique full keys.
-func (c *Cache[T]) dedupKeys(keys []string) (fullToOrig map[string]string, fullKeys []string) {
-	fullToOrig = make(map[string]string, len(keys))
-	fullKeys = make([]string, 0, len(keys))
-	for _, key := range keys {
-		fk := c.fullKey(key)
-		if _, seen := fullToOrig[fk]; seen {
+// dedupKeys returns the unique logical keys in order.
+func (c *Cache[T]) dedupKeys(keys []string) []string {
+	seen := make(map[string]struct{}, len(keys))
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if _, ok := seen[k]; ok {
 			continue
 		}
-		fullToOrig[fk] = key
-		fullKeys = append(fullKeys, fk)
+		seen[k] = struct{}{}
+		out = append(out, k)
 	}
-	return fullToOrig, fullKeys
+	return out
 }
 
-// readManyRaw reads fullKeys via the batch store when available, otherwise
-// falling back to one Get per key. A batch-read error is treated as a total
-// miss (never fails the request), matching Get's read-error-is-a-miss policy.
-func (c *Cache[T]) readManyRaw(ctx context.Context, fullKeys []string) map[string][]byte {
-	if c.batch != nil {
-		raw, bErr := c.batch.GetMany(ctx, fullKeys)
+// readManyRaw reads each logical key's raw bytes. A non-alias cache with a batch store uses one
+// MGET; alias caches (no batch alias read) and non-batch stores fall back to per-key getValue. A
+// read error is treated as a miss (never fails the request), matching Get.
+func (c *Cache[T]) readManyRaw(ctx context.Context, keys []string) map[string][]byte {
+	out := make(map[string][]byte, len(keys))
+	if !c.isAliasGroup && c.batch != nil {
+		full := make([]string, len(keys))
+		fullToLogical := make(map[string]string, len(keys))
+		for i, k := range keys {
+			fk := c.fullKey(k)
+			full[i] = fk
+			fullToLogical[fk] = k
+		}
+		got, bErr := c.batch.GetMany(ctx, full)
 		if bErr != nil {
-			return map[string][]byte{}
+			return out
 		}
-		return raw
+		for fk, b := range got {
+			out[fullToLogical[fk]] = b
+		}
+		return out
 	}
-	raw := make(map[string][]byte, len(fullKeys))
-	for _, fk := range fullKeys {
-		b, gErr := c.store.Get(ctx, fk)
-		if gErr == nil {
-			raw[fk] = b
+	for _, k := range keys {
+		if b, gErr := c.getValue(ctx, k); gErr == nil {
+			out[k] = b
 		}
 	}
-	return raw
+	return out
 }
 
-// splitHitsAndMisses classifies each full key's raw bytes into a cache hit
-// (added to result), a negative hit (metered, omitted from result), or a miss
-// (absent or corrupt — appended to missing for loadMissing to resolve).
-func (c *Cache[T]) splitHitsAndMisses(
-	ctx context.Context,
-	fullKeys []string,
-	fullToOrig map[string]string,
-	raw map[string][]byte,
-) (result map[string]*T, missing []string) {
-	result = make(map[string]*T, len(fullKeys))
-	for _, fk := range fullKeys {
-		origKey := fullToOrig[fk]
-		b, ok := raw[fk]
+// splitHitsAndMisses classifies each logical key: hit (added to result), negative hit (metered,
+// omitted), or miss (absent or corrupt — appended to missing).
+func (c *Cache[T]) splitHitsAndMisses(ctx context.Context, keys []string, raw map[string][]byte) (result map[string]*T, missing []string) {
+	result = make(map[string]*T, len(keys))
+	for _, k := range keys {
+		b, ok := raw[k]
 		if !ok {
-			missing = append(missing, origKey)
+			missing = append(missing, k)
 			continue
 		}
 		if bytes.Equal(b, negativeMarker) {
@@ -402,11 +408,10 @@ func (c *Cache[T]) splitHitsAndMisses(
 		}
 		var v T
 		if uErr := c.codec.Unmarshal(b, &v); uErr != nil {
-			// Corrupt/unreadable cached entry: treat as a miss and reload.
-			missing = append(missing, origKey)
+			missing = append(missing, k)
 			continue
 		}
-		result[origKey] = &v
+		result[k] = &v
 		c.metrics.recordOutcome(ctx, Hit)
 	}
 	return result, missing

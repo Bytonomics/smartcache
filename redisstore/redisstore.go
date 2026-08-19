@@ -33,11 +33,21 @@ type store struct {
 var (
 	_ smartcache.CacheStore      = (*store)(nil)
 	_ smartcache.BatchCacheStore = (*store)(nil)
+	_ smartcache.AliasCacheStore = (*store)(nil)
 )
 
 // New returns a smartcache.CacheStore backed by conn.
 func New(conn RedisConn) smartcache.CacheStore {
 	return &store{conn: conn}
+}
+
+// AliasGroup returns the alias strategy for the given namespace + slot mode: colocatedOps for
+// AliasColocated (single-slot atomic Lua) or shardedOps for AliasSharded (distributed, read-repair).
+func (s *store) AliasGroup(ns string, mode smartcache.AliasMode) smartcache.AliasOps {
+	if mode == smartcache.AliasSharded {
+		return &shardedOps{conn: s.conn, ns: ns}
+	}
+	return &colocatedOps{conn: s.conn, ns: ns}
 }
 
 func (s *store) Get(ctx context.Context, key string) ([]byte, error) {

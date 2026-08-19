@@ -20,14 +20,14 @@ type entry struct {
 
 // store is an in-memory smartcache.CacheStore.
 type store struct {
-	mu     sync.RWMutex
-	data   map[string]entry
-	groups map[string]*memberSet // membersKey -> its alias-pointer keys (alias-group bookkeeping)
+	mu      sync.RWMutex
+	data    map[string]entry
+	members map[string]*membersHash // membersKey -> field->aliasValue (alias-group bookkeeping)
 }
 
-// memberSet is an in-memory members set (the pointer keys for one primary) with optional expiry.
-type memberSet struct {
-	members   map[string]struct{}
+// membersHash is an in-memory members HASH (field -> aliasValue for one primary) with optional expiry.
+type membersHash struct {
+	fields    map[string]string
 	expiresAt time.Time
 }
 
@@ -39,7 +39,14 @@ var (
 
 // New returns a new in-memory smartcache.CacheStore.
 func New() smartcache.CacheStore {
-	return &store{data: make(map[string]entry), groups: make(map[string]*memberSet)}
+	return &store{data: make(map[string]entry), members: make(map[string]*membersHash)}
+}
+
+// AliasGroup returns memstore's single mode-agnostic AliasOps bound to ns. One process has no
+// Cluster slots, so AliasColocated and AliasSharded behave identically here; the mode only selects
+// the key strings (via internal/keyspace) so they match an equivalent redis deployment.
+func (s *store) AliasGroup(ns string, mode smartcache.AliasMode) smartcache.AliasOps {
+	return &memAliasOps{s: s, ns: ns, sharded: mode == smartcache.AliasSharded}
 }
 
 func (s *store) Get(ctx context.Context, key string) ([]byte, error) {

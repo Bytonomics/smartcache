@@ -42,7 +42,7 @@ Background reading: [Cache stampede (Wikipedia)](https://en.wikipedia.org/wiki/C
 - **`Manager` + `Register`** — the only way to build a `Cache[T]`. A `Manager` holds the injected `CacheStore`, a set of default options, and (optionally) an OpenTelemetry metrics exporter; `Register[T]` creates one named `Cache[T]` on it, inheriting the manager's defaults unless you override them for that entity.
 - **`CacheStore` interface** — the injected cache backend (never the application's own database). `memstore` (in-memory) and `redisstore` (go-redis) are provided; bring your own implementation for any other system.
 - **Generic `Cache[T]`** — read-through `Get`/`GetMany` with a loader function; write-through `Put` with a writer function; `PutValue` to cache a value you already hold, with no external write; `Evict` and `EvictMany` for delete-on-write.
-- **`RegisterAliasGroup` + alias groups** — an opt-in second constructor for a value reachable by several lookup keys (id, email, slug, …), where a write or delete through any one of them keeps the rest consistent — see [`RegisterAliasGroup`](#registeraliasgroup--one-value-many-lookup-keys).
+- **`RegisterAliasGroup` + alias groups** — an opt-in second constructor for a value reachable by several lookup keys (id, email, slug, …), where a write or delete through any one of them keeps the rest consistent — pick per-cache slot placement with AliasMode (Colocated vs Sharded) for Redis Cluster — see [`RegisterAliasGroup`](#registeraliasgroup--one-value-many-lookup-keys).
 - **Required positive TTL backstop** — the resolved `TTL` must be positive. Opt in to no expiry via `AllowInfinite: true`.
 - **Downward-only TTL jitter** — both `TTL` and `NegativeTTL` are independently shaved down by a random fraction (default 10%, configurable, 0 disables) so keys written together don't all expire in sync.
 - **Optional negative caching, off by default** — cache "not found" results for a separate duration via `NegativeTTL`. There is no built-in default duration; negative caching only activates once you set `NegativeTTL` to a positive value yourself, so its behavior is never a surprise.
@@ -303,6 +303,66 @@ alias for it, exactly as deleting through the primary key does — so no lookup 
 deleted data. There is no separate "update by alias" method: a primary `Put`/`PutValue` already updates every
 alias's view.
 
+### Slot placement: `AliasColocated` vs `AliasSharded`
+
+An alias-group cache chooses one of two Redis-Cluster slot-placement strategies via
+`EntityOptions.AliasMode` (default `AliasColocated`). The public API is identical in both modes;
+only slot placement, hop count, and cross-key atomicity differ.
+
+| | `AliasColocated` (default) | `AliasSharded` |
+|---|---|---|
+| slot granularity | one slot per **entity** (`{ns}`) | one slot per **record** + per **alias** |
+| `GetByAlias` | 1 atomic Lua | 2 hops (resolve → validate-on-read) |
+| write / evict | 1 atomic Lua cascade | record-slot atomic Lua + best-effort pointer ops |
+| atomicity | full single-Lua cascade | record atomic; pointers best-effort, self-healing |
+| stale reads | none | none (validate-on-read) |
+| Cluster hotspot | **yes — one slot per entity** | **no** |
+| best for | single-instance Redis, or small / low-traffic entities | Cluster with any large / hot entity |
+
+Rule of thumb: **single-instance Redis → `AliasColocated`; Cluster with any hot or large entity →
+`AliasSharded`.** `AliasColocated` is still *correct* on a Cluster — it just concentrates that
+entity's traffic on one node.
+
+```go
+mode := smartcache.AliasSharded
+users, _ := smartcache.RegisterAliasGroup[User](mgr, "user", &smartcache.EntityOptions{
+    TTL:       &ttl,
+    AliasMode: &mode,
+})
+```
+
+`AliasColocated` — the whole `user` entity lives on one slot:
+
+```mermaid
+flowchart LR
+  subgraph S["slot = hash('user') — WHOLE entity here"]
+    V["bc:{user}:5 (value)"]
+    M["bc:memb:{user}:5 (HASH email→foo, slug→ada)"]
+    P1["bc:grp:{user}:email:foo → 5"]
+    P2["bc:grp:{user}:slug:ada → 5"]
+  end
+  P1 -. resolve .-> V
+  P2 -. resolve .-> V
+```
+
+`AliasSharded` — the record and each alias land on independent slots:
+
+```mermaid
+flowchart LR
+  subgraph R["slot = hash('user:5')"]
+    V["bc:{user:5} (value)"]
+    M["bc:memb:{user:5} (HASH email→foo, slug→ada)"]
+  end
+  subgraph A1["slot = hash('user:email:foo')"]
+    P1["bc:grp:{user:email:foo} → 5"]
+  end
+  subgraph A2["slot = hash('user:slug:ada')"]
+    P2["bc:grp:{user:slug:ada} → 5"]
+  end
+  P1 -. "resolve → validate members[email]==foo" .-> V
+  P2 -. "resolve → validate members[slug]==ada" .-> V
+```
+
 ### TTL jitter
 
 ```go
@@ -445,28 +505,46 @@ Optionally, also implement `BatchCacheStore` (embeds `CacheStore` and adds one `
 ### `AliasCacheStore` — backing `RegisterAliasGroup`
 
 To back an alias-group cache (see [`RegisterAliasGroup`](#registeraliasgroup--one-value-many-lookup-keys)) with your own
-storage system, implement `AliasCacheStore` in addition to `CacheStore`:
+storage system, implement `AliasCacheStore` in addition to `CacheStore`. It is a factory: given the cache's
+namespace and slot-placement mode, it returns an `AliasOps` handle that owns all key math and grouped
+operations for that cache:
 
 ```go
-type AliasCacheStore interface {
-	CacheStore
-	GetByAlias(ctx context.Context, pointerKey string) ([]byte, error)
-	PutByAlias(ctx context.Context, spec *AliasWriteSpec) error
-	EvictByPrimary(ctx context.Context, valueKey, membersKey string) error
-	EvictByAlias(ctx context.Context, pointerKey, valueKeyPrefix, membersKeyPrefix string) error
+type AliasMode int
+
+const (
+	AliasColocated AliasMode = iota // one Cluster slot per entity; single atomic Lua per op. Default.
+	AliasSharded                    // distributed per record/alias; validate-on-read.
+)
+
+type AliasRef struct {
+	Field string
+	Value string
 }
 
-type AliasWriteSpec struct {
-	ValueKey, MembersKey, PointerKey, FieldPrefix, ValueKeyPrefix, MembersKeyPrefix string
-	Value []byte
-	TTL   time.Duration
+type AliasOps interface {
+	GetValue(ctx context.Context, primary string) ([]byte, error)
+	PutValue(ctx context.Context, primary string, val []byte, ttl time.Duration) error
+	EvictByPrimary(ctx context.Context, primary string) error
+	GetByAlias(ctx context.Context, ref AliasRef) ([]byte, error)
+	PutByAlias(ctx context.Context, primary string, ref AliasRef, val []byte, ttl time.Duration) error
+	EvictByAlias(ctx context.Context, ref AliasRef) error
+}
+
+type AliasCacheStore interface {
+	CacheStore
+	AliasGroup(ns string, mode AliasMode) AliasOps
 }
 ```
 
-`RegisterAliasGroup` detects this interface the same way `Cache[T].GetMany` detects `BatchCacheStore` — a
+`RegisterAliasGroup` detects `AliasCacheStore` the same way `Cache[T].GetMany` detects `BatchCacheStore` — a
 type assertion at registration time, so a store that doesn't implement it simply can't be used with
-`RegisterAliasGroup` (see the [Error reference](#error-reference) for the resulting panic). `redisstore` and
-`memstore` both implement it out of the box.
+`RegisterAliasGroup` (see the [Error reference](#error-reference) for the resulting panic). `redisstore` ships
+both a `AliasColocated` and an `AliasSharded` implementation; `memstore` ships a single mode-agnostic
+implementation (a single process has no Cluster slots to distribute across, so mode doesn't affect its
+behavior). The mode is chosen per cache via `EntityOptions.AliasMode` (`nil` defaults to `AliasColocated`) and
+is fixed for the cache's lifetime. See [`docs/1-alias-cache-design.md`](./docs/1-alias-cache-design.md) for the
+full design, including the trade-offs between the two modes.
 
 ### Custom serialization (`Codec`)
 

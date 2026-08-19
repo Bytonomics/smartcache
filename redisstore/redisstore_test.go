@@ -12,6 +12,18 @@ import (
 	"github.com/Bytonomics/smartcache/redisstore"
 )
 
+type fakeEval struct {
+	script string
+	keys   []string
+	args   []any
+}
+
+type fakeSet struct {
+	key string
+	val any
+	ttl time.Duration
+}
+
 // fakeConn implements redisstore.RedisConn for testing.
 type fakeConn struct {
 	getVal         string
@@ -30,6 +42,8 @@ type fakeConn struct {
 	lastEvalScript string
 	lastEvalKeys   []string
 	lastEvalArgs   []any
+	evalCalls      []fakeEval
+	setCalls       []fakeSet
 }
 
 var _ redisstore.RedisConn = (*fakeConn)(nil)
@@ -42,6 +56,7 @@ func (f *fakeConn) Set(ctx context.Context, key string, value any, ttl time.Dura
 	f.lastSetKey = key
 	f.lastSetVal = value
 	f.lastSetTTL = ttl
+	f.setCalls = append(f.setCalls, fakeSet{key: key, val: value, ttl: ttl})
 	return redis.NewStatusResult("OK", f.setErr)
 }
 
@@ -61,6 +76,7 @@ func (f *fakeConn) Eval(ctx context.Context, script string, keys []string, args 
 	f.lastEvalScript = script
 	f.lastEvalKeys = keys
 	f.lastEvalArgs = args
+	f.evalCalls = append(f.evalCalls, fakeEval{script: script, keys: keys, args: args})
 	return redis.NewCmdResult(f.evalResult, f.evalErr)
 }
 

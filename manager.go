@@ -122,6 +122,7 @@ type EntityOptions struct {
 	NegativeTTL         *time.Duration
 	DisableSingleflight *bool
 	Codec               Codec
+	AliasMode           *AliasMode // nil => AliasColocated; honored only by RegisterAliasGroup.
 }
 
 // Register creates a Cache[T] on m under name (required, unique; it doubles as
@@ -230,11 +231,11 @@ func Register[T any](m *Manager, name string, opts *EntityOptions) (*Cache[T], e
 }
 
 // RegisterAliasGroup registers an alias-group cache: one cached value reachable by several alias
-// keys, with all bookkeeping maintained atomically by the store. It behaves like Register but
-// additionally (a) requires the manager's store to implement AliasCacheStore and (b) requires T to
-// implement PrimaryKeyed (so GetByAlias read-through can learn a value's primary key). Like
-// Register's pointer-type check, it panics on a misconfiguration that must fail at init: a pointer
-// T, a store without AliasCacheStore, or a T that is not PrimaryKeyed.
+// keys. It behaves like Register but additionally (a) requires the manager's store to implement
+// AliasCacheStore, (b) requires T to implement PrimaryKeyed, and (c) resolves the slot mode from
+// opts.AliasMode (default AliasColocated) and binds an AliasOps strategy handle via the store's
+// AliasGroup factory. Like Register's pointer-type check, it panics on a misconfiguration that
+// must fail at init: a pointer T, a store without AliasCacheStore, or a T that is not PrimaryKeyed.
 func RegisterAliasGroup[T any](m *Manager, name string, opts *EntityOptions) (*Cache[T], error) {
 	if t := reflect.TypeFor[T](); t.Kind() == reflect.Pointer {
 		panic(fmt.Errorf("smartcache.RegisterAliasGroup[%s]: %w", t, ErrPointerType))
@@ -246,11 +247,15 @@ func RegisterAliasGroup[T any](m *Manager, name string, opts *EntityOptions) (*C
 	if _, ok := any((*T)(nil)).(PrimaryKeyed); !ok {
 		panic(fmt.Errorf("smartcache.RegisterAliasGroup[%q]: T must implement PrimaryKeyed (CachePrimaryKey() string)", name))
 	}
+	mode := AliasColocated
+	if opts != nil && opts.AliasMode != nil {
+		mode = *opts.AliasMode
+	}
 	c, err := Register[T](m, name, opts)
 	if err != nil {
 		return nil, err
 	}
-	c.aliasStore = aliasStore
+	c.aliasOps = aliasStore.AliasGroup(c.opts.Prefix, mode)
 	c.isAliasGroup = true
 	return c, nil
 }
