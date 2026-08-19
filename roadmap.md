@@ -1,3 +1,8 @@
+---
+type: Plan
+title: "smartcache Roadmap"
+---
+
 # smartcache Roadmap
 
 A living record of what smartcache can do today and what is planned next.

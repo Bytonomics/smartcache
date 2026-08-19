@@ -20,6 +20,9 @@ type RedisConn interface {
 	Del(ctx context.Context, keys ...string) *redis.IntCmd
 	Exists(ctx context.Context, keys ...string) *redis.IntCmd
 	MGet(ctx context.Context, keys ...string) *redis.SliceCmd
+	// Eval runs a Lua script server-side (used by the alias-group store). *redis.Client
+	// satisfies this. Signature matches go-redis v9's Cmdable.Eval.
+	Eval(ctx context.Context, script string, keys []string, args ...any) *redis.Cmd
 }
 
 // store is a go-redis-backed smartcache.CacheStore.

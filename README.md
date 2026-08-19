@@ -1,3 +1,8 @@
+---
+type: Overview
+title: "smartcache"
+---
+
 # smartcache
 
 A small Go cache library whose one generic, type-safe `Cache[T]` does **both read-through and write-through** over a **pluggable, backend-agnostic store** — so you stop re-implementing the miss → load → populate → invalidate dance for every entity, and you can swap Redis for in-memory (or your own backend) without touching a single call site.
@@ -37,6 +42,7 @@ Background reading: [Cache stampede (Wikipedia)](https://en.wikipedia.org/wiki/C
 - **`Manager` + `Register`** — the only way to build a `Cache[T]`. A `Manager` holds the injected `CacheStore`, a set of default options, and (optionally) an OpenTelemetry metrics exporter; `Register[T]` creates one named `Cache[T]` on it, inheriting the manager's defaults unless you override them for that entity.
 - **`CacheStore` interface** — the injected cache backend (never the application's own database). `memstore` (in-memory) and `redisstore` (go-redis) are provided; bring your own implementation for any other system.
 - **Generic `Cache[T]`** — read-through `Get`/`GetMany` with a loader function; write-through `Put` with a writer function; `PutValue` to cache a value you already hold, with no external write; `Evict` and `EvictMany` for delete-on-write.
+- **`RegisterAliasGroup` + alias groups** — an opt-in second constructor for a value reachable by several lookup keys (id, email, slug, …), where a write or delete through any one of them keeps the rest consistent — see [`RegisterAliasGroup`](#registeraliasgroup--one-value-many-lookup-keys).
 - **Required positive TTL backstop** — the resolved `TTL` must be positive. Opt in to no expiry via `AllowInfinite: true`.
 - **Downward-only TTL jitter** — both `TTL` and `NegativeTTL` are independently shaved down by a random fraction (default 10%, configurable, 0 disables) so keys written together don't all expire in sync.
 - **Optional negative caching, off by default** — cache "not found" results for a separate duration via `NegativeTTL`. There is no built-in default duration; negative caching only activates once you set `NegativeTTL` to a positive value yourself, so its behavior is never a surprise.
@@ -231,6 +237,72 @@ if err := users.Evict(ctx, "u_123"); err != nil {
 `Put`/`PutValue`, so the next `Get` for that key is a clean read-through instead of serving stale data.
 `EvictMany` does the same for several keys at once, joining any errors.
 
+### `RegisterAliasGroup` — one value, many lookup keys
+
+```go
+type User struct {
+	ID    string
+	Name  string
+	Email string
+}
+
+func (u User) CachePrimaryKey() string { return u.ID }
+
+users, err := smartcache.RegisterAliasGroup[User](mgr, "user", &smartcache.EntityOptions{TTL: &ttl})
+if err != nil {
+	panic(err)
+}
+```
+
+`RegisterAliasGroup` is `Register`'s alias-aware counterpart: it builds a `Cache[T]` whose one cached value can
+be reachable by several lookup keys — e.g. a user by id, by email, and by slug — where writing or deleting
+through **any** key keeps the rest consistent. `User` must implement `PrimaryKeyed` (one method,
+`CachePrimaryKey() string`, returning its own primary key); `RegisterAliasGroup` panics at startup — not at
+first use — if `User` doesn't implement it, or if the injected `CacheStore` doesn't support alias groups. Both
+bundled stores, `memstore` and `redisstore`, support alias groups.
+
+### `PutAliased` / `PutAliasedValue` — register an alias
+
+```go
+_, _, err = users.PutAliased(ctx, "u_123", smartcache.AliasRef{Field: "email", Value: "ada@example.com"},
+	func(ctx context.Context) (*User, error) {
+		return loadUserFromDB(ctx, "u_123")
+	})
+```
+
+`PutAliased` is `Put`'s alias-aware counterpart — it runs your writer and registers the given alias for the
+result, so a later `GetByAlias` finds it. `PutAliasedValue` is `PutValue`'s counterpart: it registers an alias
+for a value you already hold, with no writer call. Call either once per alias, as your code first needs each
+lookup path. A field holds at most one value per record: registering `email` again for the same primary
+replaces the old one, and if that email was already registered to a *different* primary, it is moved rather
+than shared.
+
+### `GetByAlias` — read-through by alias
+
+```go
+user, outcome, err := users.GetByAlias(ctx, smartcache.AliasRef{Field: "email", Value: "ada@example.com"},
+	func(ctx context.Context) (*User, error) {
+		return loadUserByEmailFromDB(ctx, "ada@example.com")
+	})
+```
+
+`GetByAlias` is `Get`'s alias-aware counterpart. On a hit it resolves the alias straight to the value, same as
+`Get`. On a miss it runs your loader, reads the loaded value's `CachePrimaryKey()`, and registers this alias for
+it automatically — so a first-ever login by email warms the cache exactly like a first `Get` by id would.
+
+### `EvictByAlias` — delete-on-write by alias
+
+```go
+if err := users.EvictByAlias(ctx, smartcache.AliasRef{Field: "email", Value: "ada@example.com"}); err != nil {
+	panic(err)
+}
+```
+
+`EvictByAlias` is `Evict`'s alias-aware counterpart: deleting through an alias removes the value and **every**
+alias for it, exactly as deleting through the primary key does — so no lookup path is left pointing at stale or
+deleted data. There is no separate "update by alias" method: a primary `Put`/`PutValue` already updates every
+alias's view.
+
 ### TTL jitter
 
 ```go
@@ -370,6 +442,32 @@ implementation to `smartcache.NewManager(store, ...)` in place of `memstore.New(
 
 Optionally, also implement `BatchCacheStore` (embeds `CacheStore` and adds one `GetMany(ctx, keys) (map[string][]byte, error)` method) so `Cache[T].GetMany` can read several keys in a single round trip instead of falling back to one `Get` call per key. `redisstore` implements it via Redis `MGET`; `memstore` implements it with an in-process loop.
 
+### `AliasCacheStore` — backing `RegisterAliasGroup`
+
+To back an alias-group cache (see [`RegisterAliasGroup`](#registeraliasgroup--one-value-many-lookup-keys)) with your own
+storage system, implement `AliasCacheStore` in addition to `CacheStore`:
+
+```go
+type AliasCacheStore interface {
+	CacheStore
+	GetByAlias(ctx context.Context, pointerKey string) ([]byte, error)
+	PutByAlias(ctx context.Context, spec *AliasWriteSpec) error
+	EvictByPrimary(ctx context.Context, valueKey, membersKey string) error
+	EvictByAlias(ctx context.Context, pointerKey, valueKeyPrefix, membersKeyPrefix string) error
+}
+
+type AliasWriteSpec struct {
+	ValueKey, MembersKey, PointerKey, FieldPrefix, ValueKeyPrefix, MembersKeyPrefix string
+	Value []byte
+	TTL   time.Duration
+}
+```
+
+`RegisterAliasGroup` detects this interface the same way `Cache[T].GetMany` detects `BatchCacheStore` — a
+type assertion at registration time, so a store that doesn't implement it simply can't be used with
+`RegisterAliasGroup` (see the [Error reference](#error-reference) for the resulting panic). `redisstore` and
+`memstore` both implement it out of the box.
+
 ### Custom serialization (`Codec`)
 
 By default `Cache[T]` serializes values as JSON. To use a different encoding — for speed, a compact binary
@@ -423,8 +521,10 @@ only one that **panics** (a programming error caught at construction) rather tha
 | `ErrInvalidJitterFraction` | `Register` (returned) | The resolved jitter fraction is outside `[0, 1)`. |
 | `ErrEmptyName` | `Register` (returned) | The cache name is empty. |
 | `ErrDuplicateName` | `Register` (returned) | A cache with that name is already registered on the manager. |
-| `ErrPointerType` | `Register` (**panics**) | `T` is itself a pointer type (e.g. `Register[*User]`) — a programming error, caught at construction. |
+| `ErrPointerType` | `Register` / `RegisterAliasGroup` (**panics**) | `T` is itself a pointer type (e.g. `Register[*User]`) — a programming error, caught at construction. |
 | `ErrNilStore` | `NewManager` (returned) | The `CacheStore` passed to `NewManager` is nil. |
+| `ErrAliasingNotSupported` | `RegisterAliasGroup` (**panics**) | The injected `CacheStore` doesn't support alias groups. |
+| `ErrNotAliasGroup` | `GetByAlias` / `PutAliased` / `PutAliasedValue` / `EvictByAlias` (returned) | Called on a cache built with `Register` instead of `RegisterAliasGroup`. |
 | `ErrStoreMiss` | `CacheStore.Get` (backend contract) | The key is absent. A backend's `Get` returns it and `Cache[T]` treats it as a miss; it is never surfaced to callers. Relevant only when writing a custom backend. |
 
 ## License

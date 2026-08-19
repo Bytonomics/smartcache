@@ -86,8 +86,8 @@ type Writer[T any] func(ctx context.Context) (*T, error)
 
 // Options is the resolved configuration for a Cache[T], produced by Register.
 type Options struct {
-	// Prefix namespaces keys: the stored key is Prefix + ":" + key (or just key
-	// when Prefix is empty).
+	// Prefix namespaces keys: the stored key is bc:<Prefix>:<key> for a normal
+	// cache and bc:{<Prefix>}:<key> for an alias-group cache (built in keyspace.go).
 	Prefix string
 	// TTL is the positive backstop expiry applied to cached values. Required unless
 	// AllowInfinite is true.
@@ -112,15 +112,15 @@ type Cache[T any] struct {
 	codec          Codec
 	group          *singleflight.Group
 	jitterFraction float64
-	metrics        *cacheMetrics // nil => telemetry disabled
+	metrics        *cacheMetrics   // nil => telemetry disabled
+	aliasStore     AliasCacheStore // non-nil only for alias-group caches (RegisterAliasGroup)
+	isAliasGroup   bool            // true for caches created via RegisterAliasGroup
 }
 
-// fullKey prefixes the cache key with the configured prefix.
+// fullKey builds the value key for this cache via the central keyspace builder (keyspace.go).
+// Alias-group caches hash-tag the namespace ({ns}); non-alias caches use plain bc:<ns>:<key>.
 func (c *Cache[T]) fullKey(key string) string {
-	if c.opts.Prefix == "" {
-		return key
-	}
-	return c.opts.Prefix + ":" + key
+	return valueKey(c.opts.Prefix, key, c.isAliasGroup)
 }
 
 // positiveTTL returns the jittered positive TTL a value is stored under. When
@@ -188,7 +188,7 @@ func (c *Cache[T]) Get(ctx context.Context, key string, loader Loader[T]) (*T, O
 		switch {
 		case errors.Is(lerr, ErrNotFound):
 			if c.opts.NegativeTTL > 0 {
-				if sErr := c.store.Set(ctx, k, negativeMarker, c.negativeTTL()); sErr != nil {
+				if sErr := c.setValue(ctx, key, negativeMarker, c.negativeTTL()); sErr != nil {
 					return nil, ErrNotFound
 				}
 			}
@@ -205,7 +205,7 @@ func (c *Cache[T]) Get(ctx context.Context, key string, loader Loader[T]) (*T, O
 		if mErr != nil {
 			return &loadResult{val: val}, nil
 		}
-		if sErr := c.store.Set(ctx, k, b, c.positiveTTL()); sErr != nil {
+		if sErr := c.setValue(ctx, key, b, c.positiveTTL()); sErr != nil {
 			return &loadResult{val: val}, nil
 		}
 		return &loadResult{val: val, populated: true}, nil
@@ -263,13 +263,12 @@ func (c *Cache[T]) Put(ctx context.Context, key string, writer Writer[T]) (*T, O
 		return nil, Written, ErrNilWrite
 	}
 
-	k := c.fullKey(key)
 	b, mErr := c.codec.Marshal(val)
 	if mErr != nil {
 		c.metrics.recordOutcome(ctx, WrittenNotCached)
 		return val, WrittenNotCached, nil
 	}
-	if sErr := c.store.Set(ctx, k, b, c.positiveTTL()); sErr != nil {
+	if sErr := c.setValue(ctx, key, b, c.positiveTTL()); sErr != nil {
 		c.metrics.recordOutcome(ctx, WrittenNotCached)
 		return val, WrittenNotCached, nil
 	}
@@ -285,14 +284,14 @@ func (c *Cache[T]) PutValue(ctx context.Context, key string, val *T) error {
 	if err != nil {
 		return err
 	}
-	return c.store.Set(ctx, c.fullKey(key), b, c.positiveTTL())
+	return c.setValue(ctx, key, b, c.positiveTTL())
 }
 
 // Evict deletes key (delete-on-write). It returns the delete error so the caller
 // can retry or alarm; the TTL backstop bounds staleness if it fails.
 func (c *Cache[T]) Evict(ctx context.Context, key string) error {
 	c.metrics.recordEvict(ctx, 1)
-	return c.store.Delete(ctx, c.fullKey(key))
+	return c.deleteValue(ctx, key)
 }
 
 // EvictMany deletes several keys, joining any errors.
@@ -300,7 +299,7 @@ func (c *Cache[T]) EvictMany(ctx context.Context, keys ...string) error {
 	c.metrics.recordEvict(ctx, int64(len(keys)))
 	var errs []error
 	for _, key := range keys {
-		if err := c.store.Delete(ctx, c.fullKey(key)); err != nil {
+		if err := c.deleteValue(ctx, key); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -419,7 +418,6 @@ func (c *Cache[T]) splitHitsAndMisses(
 // to result either way.
 func (c *Cache[T]) populateLoaded(ctx context.Context, missing []string, loaded, result map[string]*T) {
 	for _, origKey := range missing {
-		fk := c.fullKey(origKey)
 		v, ok := loaded[origKey]
 		if ok && v != nil {
 			result[origKey] = v
@@ -428,7 +426,7 @@ func (c *Cache[T]) populateLoaded(ctx context.Context, missing []string, loaded,
 				c.metrics.recordOutcome(ctx, LoadedNotCached)
 				continue
 			}
-			if sErr := c.store.Set(ctx, fk, b, c.positiveTTL()); sErr != nil {
+			if sErr := c.setValue(ctx, origKey, b, c.positiveTTL()); sErr != nil {
 				c.metrics.recordOutcome(ctx, LoadedNotCached)
 				continue
 			}
@@ -438,7 +436,7 @@ func (c *Cache[T]) populateLoaded(ctx context.Context, missing []string, loaded,
 		// Not found in the source of truth: negative-cache when enabled, but
 		// never add it to the result map either way.
 		if c.opts.NegativeTTL > 0 {
-			if sErr := c.store.Set(ctx, fk, negativeMarker, c.negativeTTL()); sErr != nil {
+			if sErr := c.setValue(ctx, origKey, negativeMarker, c.negativeTTL()); sErr != nil {
 				c.metrics.recordOutcome(ctx, LoadedNotCached)
 				continue
 			}

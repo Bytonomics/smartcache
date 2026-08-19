@@ -14,17 +14,22 @@ import (
 
 // fakeConn implements redisstore.RedisConn for testing.
 type fakeConn struct {
-	getVal     string
-	getErr     error
-	setErr     error
-	delErr     error
-	existsN    int64
-	existsErr  error
-	lastSetKey string
-	lastSetVal any
-	lastSetTTL time.Duration
-	mgetVals   []interface{}
-	mgetErr    error
+	getVal         string
+	getErr         error
+	setErr         error
+	delErr         error
+	existsN        int64
+	existsErr      error
+	lastSetKey     string
+	lastSetVal     any
+	lastSetTTL     time.Duration
+	mgetVals       []interface{}
+	mgetErr        error
+	evalResult     any
+	evalErr        error
+	lastEvalScript string
+	lastEvalKeys   []string
+	lastEvalArgs   []any
 }
 
 var _ redisstore.RedisConn = (*fakeConn)(nil)
@@ -50,6 +55,13 @@ func (f *fakeConn) Exists(ctx context.Context, keys ...string) *redis.IntCmd {
 
 func (f *fakeConn) MGet(ctx context.Context, keys ...string) *redis.SliceCmd {
 	return redis.NewSliceResult(f.mgetVals, f.mgetErr)
+}
+
+func (f *fakeConn) Eval(ctx context.Context, script string, keys []string, args ...any) *redis.Cmd {
+	f.lastEvalScript = script
+	f.lastEvalKeys = keys
+	f.lastEvalArgs = args
+	return redis.NewCmdResult(f.evalResult, f.evalErr)
 }
 
 func TestGet_Present(t *testing.T) {

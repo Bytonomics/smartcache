@@ -20,18 +20,26 @@ type entry struct {
 
 // store is an in-memory smartcache.CacheStore.
 type store struct {
-	mu   sync.RWMutex
-	data map[string]entry
+	mu     sync.RWMutex
+	data   map[string]entry
+	groups map[string]*memberSet // membersKey -> its alias-pointer keys (alias-group bookkeeping)
+}
+
+// memberSet is an in-memory members set (the pointer keys for one primary) with optional expiry.
+type memberSet struct {
+	members   map[string]struct{}
+	expiresAt time.Time
 }
 
 var (
 	_ smartcache.CacheStore      = (*store)(nil)
 	_ smartcache.BatchCacheStore = (*store)(nil)
+	_ smartcache.AliasCacheStore = (*store)(nil)
 )
 
 // New returns a new in-memory smartcache.CacheStore.
 func New() smartcache.CacheStore {
-	return &store{data: make(map[string]entry)}
+	return &store{data: make(map[string]entry), groups: make(map[string]*memberSet)}
 }
 
 func (s *store) Get(ctx context.Context, key string) ([]byte, error) {

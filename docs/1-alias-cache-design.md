@@ -1,3 +1,8 @@
+---
+type: Reference
+title: "smartcache — Alias-Based Multi-Key Caching (Architecture Design)"
+---
+
 # smartcache — Alias-Based Multi-Key Caching (Architecture Design)
 
 **Status:** Design approved — ready for implementation spec.
@@ -177,34 +182,51 @@ operations, exactly mirroring the existing `BatchCacheStore` precedent (detected
 // AliasCacheStore is an optional CacheStore extension for backends that can
 // track atomic key groups. redisstore implements it with a Lua script;
 // memstore implements it with its existing mutex (single-process, exact).
+// Method names deliberately mirror CacheStore's own verb style (Get.../Put.../Evict...)
+// rather than a separate "Grouped"/"Resolve" vocabulary.
 type AliasCacheStore interface {
 	CacheStore
 
-	// ResolveAlias returns the value key a pointer resolves to, or ErrStoreMiss.
-	ResolveAlias(ctx context.Context, ns, field, value string) (valueKey string, err error)
+	// GetByAlias resolves a pointer key to its value key, then reads the value.
+	// Returns ErrStoreMiss when either link is absent.
+	GetByAlias(ctx context.Context, pointerKey string) ([]byte, error)
 
-	// PutGrouped writes the value at its value key and, when an alias is given,
-	// creates/refreshes that alias pointer and adds it to the primary's members
-	// set — every touched key sharing the ONE ttl. It diffs and removes any stale
-	// pointers on reassignment (Section 10). The whole write is one atomic Lua on
+	// PutByAlias writes the value at its value key and, when a pointer is given,
+	// creates/refreshes that alias pointer (one-alias-per-field replacement, plus
+	// cross-primary steal cleanup) and adds it to the primary's members set —
+	// every touched key sharing the ONE ttl. The whole write is one atomic Lua on
 	// the {ns} slot (Section 6).
-	PutGrouped(ctx context.Context, spec *AliasWriteSpec) error
+	PutByAlias(ctx context.Context, spec *AliasWriteSpec) error
 
-	// EvictGrouped deletes the value key, every pointer in the primary's members
-	// set, and the members set itself — one atomic Lua on the {ns} slot.
-	EvictGrouped(ctx context.Context, ns, primary string) error
+	// EvictByPrimary deletes the value key, every pointer in the primary's
+	// members set, and the members set itself — one atomic Lua on the {ns} slot.
+	EvictByPrimary(ctx context.Context, valueKey, membersKey string) error
+
+	// EvictByAlias resolves the pointer to its primary, then cascades exactly
+	// like EvictByPrimary.
+	EvictByAlias(ctx context.Context, pointerKey, valueKeyPrefix, membersKeyPrefix string) error
 }
 
-// AliasWriteSpec is one grouped write. Alias is empty for a plain grouped value write.
+// AliasWriteSpec carries the pre-built key strings (from keyspace.go) for one grouped
+// write. The pointer-related fields are empty for a primary-only value write, which
+// still refreshes every existing group key's TTL.
 type AliasWriteSpec struct {
-	Namespace string        // ns, e.g. "user"
-	Primary   string        // primary key, e.g. "5"
-	Value     []byte        // serialized T
-	Alias     *AliasRef     // nil = value-only write; non-nil = also register this alias
-	TTL       time.Duration // the single jittered TTL for EVERY key in the write
+	ValueKey         string        // bc:{ns}:<primary>
+	MembersKey       string        // bc:memb:{ns}:<primary>
+	PointerKey       string        // bc:grp:{ns}:<field>:<value>   ("" => primary-only write)
+	FieldPrefix      string        // bc:grp:{ns}:<field>:          ("" => primary-only write)
+	ValueKeyPrefix   string        // bc:{ns}:      (steal-cleanup: parse old primary from old value key)
+	MembersKeyPrefix string        // bc:memb:{ns}: (steal-cleanup: rebuild old primary's members key)
+	Value            []byte
+	TTL              time.Duration // the single jittered TTL for EVERY key in the write
 }
 
 type AliasRef struct{ Field, Value string } // e.g. {"email","foo@bar.com"}
+
+// PrimaryKeyed is implemented by the cached value type T (or *T) on an alias-group
+// cache. It lets GetByAlias's read-through learn a freshly-loaded value's primary key
+// on a miss, so it can rebuild the group (Section 11).
+type PrimaryKeyed interface{ CachePrimaryKey() string }
 ```
 
 The interface is high-level on purpose: the backend owns the whole grouped operation as one
@@ -273,7 +295,7 @@ every one of them.
 **Worked example, custom prefix** (`ns = user_custom_name`): identical shape —
 `bc:{user_custom_name}:5`, `bc:grp:{user_custom_name}:email:...`, `bc:memb:{user_custom_name}:5`.
 
-An `EvictGrouped` for primary `5` therefore runs as **one** Lua on the `{user}` slot: read
+An `EvictByPrimary` for primary `5` therefore runs as **one** Lua on the `{user}` slot: read
 `bc:memb:{user}:5`, delete the value `bc:{user}:5`, delete every pointer the set lists, delete
 the members set — atomically, no separate client-side step.
 
@@ -360,12 +382,16 @@ pointer and orphan the old one, which then lingers and resolves to the record fo
 
 ### Solution — diff-and-clean inside the Lua write
 
-`PutGrouped` diffs the requested alias against what the members set already holds. On a
-change it removes stale pointers (delete the pointer key, remove it from the members set) and
-adds the new one — inside the same atomic Lua on the `{ns}` slot. No stale pointer survives.
+`PutByAlias` diffs the requested alias field against what the members set already holds (one
+alias per field per primary — Decisions log D11a): re-registering a field replaces its old
+pointer. It also handles cross-primary steal — if the alias already belonged to a different
+primary, it is removed from that primary's members set — so a later evict there cannot delete
+a pointer another record now owns. All of this happens inside the same atomic Lua on the
+`{ns}` slot. No stale pointer survives.
 
 Because aliases are added **one per call** (Section 11), the common case is "add one alias";
-the diff matters most on an explicit re-registration that drops a previously-added alias.
+the diff matters most on an explicit re-registration that drops or reassigns a previously-added
+alias.
 
 ---
 
@@ -377,24 +403,47 @@ the entity — reintroducing the coupling this feature removes. And most aliases
 exercised: which secondary keys a record is actually looked up by depends on the paths the  
 application happens to take.
 
-### Solution — lazy, one alias per call; reads/updates/deletes auto-route
+### Solution — lazy, one alias per call; explicit `AliasRef` methods for alias access
 
-- **Alias creation is explicit and incremental.** One new method adds **one** alias at a time,
-as the application first needs it:
+- **Alias creation is explicit and incremental.** Two new methods add **one** alias at a time,
+as the application first needs it — one that runs a writer, one for a value already held:
   ```go
   // PutAliased writes (or refreshes) the value for primaryKey and registers ONE alias
   // that resolves to it. Call it again, per alias, as new lookup paths appear.
   func (c *Cache[T]) PutAliased(ctx context.Context, primaryKey string, alias AliasRef, writer Writer[T]) (*T, Outcome, error)
-  ```
-- **Reads, updates, and deletes auto-route.** `Get`, `Put`/`PutValue`, and `Evict` on an
-alias-group cache detect group membership and route internally:
-  - `Get(anyKey)` — resolves an alias to its value key, or reads a primary directly.
-  - `Put`/`PutValue(anyKey)` — updates the single shared value; every alias sees the new value.
-  - `Evict(anyKey)` — cascades: deletes the value key and cleans every pointer + the members set.
 
-  There is therefore **no** `EvictAliased` and **no** `UpdateAliased` — the plain methods
-  already do the right thing. `PutAliased` is the one genuinely new method, and it exists only
-  because *registering* an alias needs the alias name, which a plain `Put` has no place to carry.
+  // PutAliasedValue is PutAliased's cache-warming twin: the caller already holds the
+  // value (e.g. just wrote it to the source of truth) and only wants the alias registered,
+  // without re-running a writer.
+  func (c *Cache[T]) PutAliasedValue(ctx context.Context, primaryKey string, alias AliasRef, val *T) error
+  ```
+- **Alias access is explicit, via `AliasRef`, on separate methods — not by overloading a
+  single string key.** `Get`, `Put`, `PutValue`, and `Evict` keep taking the **primary key
+  only**; a distinct `AliasRef`-typed method exists for the alias side of each:
+  ```go
+  func (c *Cache[T]) GetByAlias(ctx context.Context, alias AliasRef, loader Loader[T]) (*T, Outcome, error)
+  func (c *Cache[T]) EvictByAlias(ctx context.Context, alias AliasRef) error
+  ```
+  This avoids parsing a single string key to decide "is this a primary or an alias" — a scheme
+  that breaks if a primary or an alias value ever contains the field separator. Both directions
+  still cascade the whole group: `EvictByAlias` deletes the value key and cleans every pointer +
+  the members set, exactly as a primary `Evict` does; `Put`/`PutValue` on the primary update the
+  one shared value, so every alias sees the new value on its next read.
+
+- **`GetByAlias` is read-through, via `PrimaryKeyed`.** On a miss it runs `loader`, exactly like
+  `Get` does — but unlike a primary miss (where the caller already supplied the primary key), an
+  alias miss does not by itself reveal the primary key needed to store the value. So the loaded
+  value's type must implement `PrimaryKeyed`:
+  ```go
+  type PrimaryKeyed interface{ CachePrimaryKey() string }
+  ```
+  `GetByAlias` reads `CachePrimaryKey()` off the freshly-loaded value, then writes the value and
+  registers this alias for it — the same rebuild `PutAliased` would perform, done automatically
+  on a cold alias read.
+
+  There is therefore **no** `UpdateAliased` — a plain `Put`/`PutValue` on the primary already
+  updates every alias's view. `PutAliased`/`PutAliasedValue`/`GetByAlias`/`EvictByAlias` are the
+  four alias-specific additions; every other method on `Cache[T]` is unchanged.
 
 ---
 
@@ -443,28 +492,37 @@ Assume `ns = user`, an alias-group cache (created via `RegisterAliasGroup`).
 
 1. Run `writer` → value; marshal once.
 2. Compute the jittered TTL once.
-3. `PutGrouped`: set `bc:{user}:5` = value; set `bc:grp:{user}:email:foo@bar.com` = `bc:{user}:5`;
- `SADD bc:memb:{user}:5` the pointer key; diff-clean any stale pointer — all under the one TTL.
+3. `PutByAlias`: set `bc:{user}:5` = value; set `bc:grp:{user}:email:foo@bar.com` = `bc:{user}:5`;
+ `SADD bc:memb:{user}:5` the pointer key; one-per-field replace / cross-primary steal cleanup
+ as needed — all under the one TTL.
 
-**Get("email:foo@bar.com")** (alias read)
+**GetByAlias({email, foo@bar.com})** (alias read)
 
-1. `ResolveAlias(user, email, foo@bar.com)` → `bc:{user}:5` (or `ErrStoreMiss` → treat as miss).
-2. `GET bc:{user}:5` → value (or gone → miss → reload via the caller's loader).
+1. `GetByAlias(bc:grp:{user}:email:foo@bar.com)` → resolves the pointer to `bc:{user}:5`, reads
+ it → value (or either link gone → `ErrStoreMiss` → treated as a miss).
+2. On a miss: run the caller's loader, read `CachePrimaryKey()` off the result, then
+ `PutByAlias` to write the value and register this alias — the same rebuild `PutAliased`
+ performs, done automatically.
 
 **Get("5")** (primary read)
 
 1. `GET bc:{user}:5` → value directly. No pointer step.
 
-**Put("5", writer)** / **PutValue("5", val)** (update through primary or any alias)
+**Put("5", writer)** / **PutValue("5", val)** (update through the primary)
 
-1. Resolve to the value key (`bc:{user}:5`).
-2. Update the single value; every alias now resolves to the new value.
+1. Resolve to the value key (`bc:{user}:5`); write via `PutByAlias` with no pointer (primary-only
+ write), which still refreshes every existing group key's TTL.
+2. Every alias now resolves to the new value on its next read.
 
-**Evict("email:foo@bar.com")** or **Evict("5")** (delete through any key — symmetric)
+**Evict("5")** (delete through the primary)
 
-1. One atomic Lua on `{user}`: resolve to primary `5` (an alias resolves via its pointer; a
- primary is used directly), read `bc:memb:{user}:5`, `DEL bc:{user}:5` (the invalidation),
+1. One atomic Lua on `{user}`: read `bc:memb:{user}:5`, `DEL bc:{user}:5` (the invalidation),
  delete every pointer the set lists, delete the members set. Nothing leaks.
+
+**EvictByAlias({email, foo@bar.com})** (delete through an alias — symmetric result, explicit call)
+
+1. One atomic Lua on `{user}`: resolve the pointer to primary `5`, then cascade exactly as
+ `Evict("5")` does. Nothing leaks.
 
 ---
 
@@ -477,14 +535,16 @@ Assume `ns = user`, an alias-group cache (created via `RegisterAliasGroup`).
 | D2  | Pointer stores the full value key, not a bare primary                               | Resolver reads the value key verbatim; no reconstruction assumptions.                                       |
 | D3  | Two indexes: pointer (lookup) + members set (cleanup)                               | Redis cannot answer primary→aliases without a SCAN; the set is the inverse index.                           |
 | D4  | Lua / Redis Function for the grouped path                                           | Only Lua does read-branch-delete-many atomically without a WATCH retry loop.                                |
-| D5  | `AliasCacheStore` optional interface, comma-ok at `Register`                        | Mirrors the shipped `BatchCacheStore` precedent; keeps `Cache[T]` backend-agnostic.                         |
+| D5  | `AliasCacheStore` optional interface, comma-ok at `RegisterAliasGroup`; method names (`GetByAlias`/`PutByAlias`/`EvictByPrimary`/`EvictByAlias`) mirror `CacheStore`'s own verb style | Mirrors the shipped `BatchCacheStore` precedent; keeps `Cache[T]` backend-agnostic; avoids a separate "Grouped"/"Resolve" naming vocabulary. |
 | D6  | Hash-tag `{ns}` on **all** keys of an aliasing entity — value, pointer, members     | Co-locates the whole group on one slot → the entire grouped op is one atomic Lua. Price: that entity's values are pinned to one cluster node (no horizontal spread). Non-aliasing caches keep un-tagged, distributing value keys. |
 | D7  | One jittered TTL per grouped write, applied to every key                            | Prevents desynchronized expiry within a group.                                                              |
-| D8  | Opt-in by dedicated constructor `RegisterAliasGroup` (not a flag); one group per cache; group namespace auto-derived from the cache name; panic if store lacks `AliasCacheStore` | Constructor choice is the opt-in; non-aliasing caches keep the untouched fast path; misconfig crashes at init. |
+| D8  | Opt-in by dedicated constructor `RegisterAliasGroup` (not a flag); one group per cache; group namespace auto-derived from the cache name; panics if store lacks `AliasCacheStore` OR `T` is not `PrimaryKeyed` | Constructor choice is the opt-in; non-aliasing caches keep the untouched fast path; misconfig crashes at init, not at first alias read. |
 | D9  | Bloom filter deferred; pure optimization, no correctness role                       | Lua path is correct alone and handles non-grouped keys gracefully.                                          |
 | D10 | Diff-and-clean stale pointers inside the Lua write                                  | Satisfies the "no leaks / clean all metadata" requirement on reassignment.                                  |
-| D11 | One alias per `PutAliased` call; lazy                                               | Writers don't need to know the full alias set; aliases appear as paths do.                                  |
-| D12 | Auto-routing `Get`/`Put`/`Evict`; no `EvictAliased`/`UpdateAliased`                 | Plain ops already cascade; only alias *creation* needs a new method.                                        |
+| D11 | One alias per `PutAliased`/`PutAliasedValue` call; lazy; `PutAliasedValue` is the value-held twin of `PutAliased` (no writer re-run) | Writers don't need to know the full alias set; aliases appear as paths do; avoids a redundant load when the caller already holds the value. |
+| D11a | One alias per field per primary — re-registering a field replaces its old pointer (not additive) | Matches single-valued identity fields (one email, one slug); gives `PutByAlias` a well-defined diff to clean on reassignment (Section 10). |
+| D12 | Alias access is **explicit**, via `AliasRef`-typed methods (`GetByAlias`, `EvictByAlias`) — not by overloading `Get`/`Evict` to accept "any key, primary or alias" | A single string key can't safely distinguish primary from alias if either value contains the field separator; explicit methods have no such ambiguity. `Put`/`PutValue`/`Evict` keep taking only the primary key; there is no `UpdateAliased` because a primary `Put`/`PutValue` already updates every alias's view. |
+| D12a | `GetByAlias` is read-through via `PrimaryKeyed`: on a miss it runs the loader, reads `CachePrimaryKey()` off the result, and rebuilds the group | Requested explicitly so alias reads get the same "miss → load → cache" ergonomics as `Get`, without the caller needing to already know the primary key. |
 | D13 | Per-entity group namespace (`{ns}`) → keys globally unique                          | No cross-entity alias collision; the merge/steal problem does not arise.                                    |
 | D14 | All key strings built only in `keyspace.go`                                         | Single source of truth for the keyspace, per repo Redis-key-centralization rule.                            |
 | D15 | Single-process (mems4) fully supported via `memstore` mutex                         | No cross-instance concern; strictly the easy case.                                                          |
@@ -498,17 +558,18 @@ A good test asserts **external behavior** through the highest existing seam, not
 mechanics. The highest seam here is `Cache[T]`'s public methods driven over a store fake —
 the same seam the current `cache_test.go` uses.
 
-- **`Cache[T]` behavior** (over `memstore` extended with `AliasCacheStore`): alias write →
-read through every alias returns the value; evict through any key invalidates all aliases;
-update through any key is seen through every alias; reassignment removes the dropped alias
-and leaks nothing; one shared TTL across value/pointer/members (assert via a jitter seam,
-as `jitter_test.go` already does); caches created via `Register` (non-aliasing) behave
-byte-for-byte as today (regression guard).
+- **`Cache[T]` behavior** (over `memstore` extended with `AliasCacheStore`): `PutAliased` write →
+`Get` (primary) and `GetByAlias` (each field) both return the value; `Evict` (primary) and
+`EvictByAlias` both invalidate the whole group; `Put`/`PutValue` on the primary is seen through
+every alias; one-per-field replacement and cross-primary steal cleanup leak nothing;
+`GetByAlias` read-through rebuilds the group via `PrimaryKeyed` on a miss; one shared TTL across
+value/pointer/members; caches created via `Register` (non-aliasing) behave byte-for-byte as
+today (regression guard).
 - **`redisstore` `AliasCacheStore`** (over a fake `RedisConn` extended with the Lua-eval and
-set methods): the Lua write/evict issues the expected same-slot operations; `ResolveAlias`
-maps a pointer to its value key; a missing pointer returns `ErrStoreMiss`.
-- **`RegisterAliasGroup`**: with a non-`AliasCacheStore` store it panics; with an
-`AliasCacheStore` store it succeeds.
+set methods): the Lua write/evict issues the expected same-slot operations; `GetByAlias` maps
+a pointer to its value key; a missing pointer returns `ErrStoreMiss`.
+- **`RegisterAliasGroup`**: with a non-`AliasCacheStore` store it panics; with a `T` that is not
+`PrimaryKeyed` it panics; with a valid store and `PrimaryKeyed` `T` it succeeds.
 - **Prior art:** `cache_test.go`, `getmany_test.go`, `redisstore_test.go`, `jitter_test.go`.
 
 Unit tests only — no live Redis (fake `RedisConn`), consistent with the module's existing

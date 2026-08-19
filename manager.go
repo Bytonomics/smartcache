@@ -126,9 +126,9 @@ type EntityOptions struct {
 
 // Register creates a Cache[T] on m under name (required, unique; it doubles as
 // the metric name and the default key prefix). It panics with ErrPointerType if
-// T is a pointer type. It returns ErrEmptyName, ErrDuplicateName, ErrInvalidTTL,
-// or ErrInvalidJitterFraction on invalid input. A failed Register never consumes
-// the name.
+// T is a pointer type. It returns ErrEmptyName, ErrEmptyPrefix, ErrDuplicateName,
+// ErrInvalidTTL, or ErrInvalidJitterFraction on invalid input. A failed Register
+// never consumes the name.
 func Register[T any](m *Manager, name string, opts *EntityOptions) (*Cache[T], error) {
 	if t := reflect.TypeFor[T](); t.Kind() == reflect.Pointer {
 		panic(fmt.Errorf("smartcache.Register[%s]: %w", t, ErrPointerType))
@@ -149,6 +149,9 @@ func Register[T any](m *Manager, name string, opts *EntityOptions) (*Cache[T], e
 	prefix := name
 	if opts.Prefix != nil {
 		prefix = *opts.Prefix
+	}
+	if prefix == "" {
+		return nil, ErrEmptyPrefix
 	}
 	ttl := m.defaults.ttl
 	if opts.TTL != nil {
@@ -223,6 +226,32 @@ func Register[T any](m *Manager, name string, opts *EntityOptions) (*Cache[T], e
 		metrics:        cm,
 	}
 	m.registry[name] = struct{}{}
+	return c, nil
+}
+
+// RegisterAliasGroup registers an alias-group cache: one cached value reachable by several alias
+// keys, with all bookkeeping maintained atomically by the store. It behaves like Register but
+// additionally (a) requires the manager's store to implement AliasCacheStore and (b) requires T to
+// implement PrimaryKeyed (so GetByAlias read-through can learn a value's primary key). Like
+// Register's pointer-type check, it panics on a misconfiguration that must fail at init: a pointer
+// T, a store without AliasCacheStore, or a T that is not PrimaryKeyed.
+func RegisterAliasGroup[T any](m *Manager, name string, opts *EntityOptions) (*Cache[T], error) {
+	if t := reflect.TypeFor[T](); t.Kind() == reflect.Pointer {
+		panic(fmt.Errorf("smartcache.RegisterAliasGroup[%s]: %w", t, ErrPointerType))
+	}
+	aliasStore, ok := m.store.(AliasCacheStore)
+	if !ok {
+		panic(fmt.Errorf("smartcache.RegisterAliasGroup[%q]: %w", name, ErrAliasingNotSupported))
+	}
+	if _, ok := any((*T)(nil)).(PrimaryKeyed); !ok {
+		panic(fmt.Errorf("smartcache.RegisterAliasGroup[%q]: T must implement PrimaryKeyed (CachePrimaryKey() string)", name))
+	}
+	c, err := Register[T](m, name, opts)
+	if err != nil {
+		return nil, err
+	}
+	c.aliasStore = aliasStore
+	c.isAliasGroup = true
 	return c, nil
 }
 

@@ -33,7 +33,7 @@ RUN ?=
 PKG ?= ./...
 TIMEOUT ?= 5m
 
-GO_TEST_FLAGS := -v -race -count=1
+GO_TEST_FLAGS := -v -race -count=4
 
 test-run: ## Flexible test runner (use RUN=TestName PKG=./path TIMEOUT=5m)
 	@echo "═══════════════════════════════════════════════════════"
@@ -116,11 +116,11 @@ deps: ## Download and tidy Go dependencies
 
 test: ## Run all tests (parallel with race detection)
 	@echo "Running tests (race detection enabled)..."
-	go test -race -count=1 ./...
+	go test -race -count=4 ./...
 
 unit-test-coverage: ## Run unit tests with coverage and threshold enforcement (-race, for pre-commit)
 	@echo "Running unit tests with coverage (race detection enabled)..."
-	go test -race -count=1 -cover -coverprofile=/tmp/smartcache-coverage.out ./...
+	go test -race -count=4 -cover -coverprofile=/tmp/smartcache-coverage.out ./...
 	go tool cover -html=/tmp/smartcache-coverage.out -o /tmp/smartcache-coverage.html
 	@echo "Coverage report: /tmp/smartcache-coverage.html"
 	@echo "Checking coverage threshold..."

@@ -42,7 +42,21 @@ var (
 	// registered on the manager. Each registered cache must have a unique name.
 	ErrDuplicateName = errors.New("smartcache: cache name already registered")
 
+	// ErrEmptyPrefix is returned by Register when EntityOptions.Prefix is explicitly
+	// set to an empty string. Prefix namespaces every key this cache stores; an empty
+	// prefix would collide with any other cache that also opts out of namespacing.
+	ErrEmptyPrefix = errors.New("smartcache: prefix must not be empty")
+
 	// ErrInvalidJitterFraction is returned by Register when the resolved jitter
 	// fraction is outside [0, 1). Zero disables jitter.
 	ErrInvalidJitterFraction = errors.New("smartcache: jitter fraction must be in [0, 1)")
+
+	// ErrNotAliasGroup is returned when an alias-only method (GetByAlias, PutAliased,
+	// PutAliasedValue, EvictByAlias) is called on a cache that was not created with
+	// RegisterAliasGroup.
+	ErrNotAliasGroup = errors.New("smartcache: cache is not an alias group")
+
+	// ErrAliasingNotSupported is used in the RegisterAliasGroup panic when the manager's
+	// store does not implement AliasCacheStore.
+	ErrAliasingNotSupported = errors.New("smartcache: store does not implement AliasCacheStore")
 )

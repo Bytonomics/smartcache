@@ -1,3 +1,8 @@
+---
+type: Reference
+title: "smartcache — Deferred: Bloom-Filter Alias Routing (Future Optimization)"
+---
+
 # smartcache — Deferred: Bloom-Filter Alias Routing (Future Optimization)
 
 **Status:** Deferred. Not built. Captured so the approach and its hazard are not re-derived later.

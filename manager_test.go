@@ -96,8 +96,8 @@ func TestRegister_DefaultPrefixFromName(t *testing.T) {
 	if err := c.PutValue(ctx, "42", &sample{N: 1}); err != nil {
 		t.Fatalf("PutValue failed: %v", err)
 	}
-	if len(store.setKeys) == 0 || store.setKeys[len(store.setKeys)-1] != "user:42" {
-		t.Errorf("stored key: got %v, want last entry %q (default prefix is the registered name)", store.setKeys, "user:42")
+	if len(store.setKeys) == 0 || store.setKeys[len(store.setKeys)-1] != "bc:user:42" {
+		t.Errorf("stored key: got %v, want last entry %q (default prefix is the registered name)", store.setKeys, "bc:user:42")
 	}
 }
 
@@ -118,8 +118,21 @@ func TestRegister_PrefixOverride(t *testing.T) {
 	if err := c.PutValue(ctx, "42", &sample{N: 1}); err != nil {
 		t.Fatalf("PutValue failed: %v", err)
 	}
-	if len(store.setKeys) == 0 || store.setKeys[len(store.setKeys)-1] != "custom:42" {
-		t.Errorf("stored key: got %v, want last entry %q", store.setKeys, "custom:42")
+	if len(store.setKeys) == 0 || store.setKeys[len(store.setKeys)-1] != "bc:custom:42" {
+		t.Errorf("stored key: got %v, want last entry %q", store.setKeys, "bc:custom:42")
+	}
+}
+
+// TestRegister_EmptyPrefix_Error verifies Register rejects an explicitly empty
+// EntityOptions.Prefix rather than silently namespacing keys under no prefix.
+func TestRegister_EmptyPrefix_Error(t *testing.T) {
+	mgr, err := smartcache.NewManager(memstore.New())
+	if err != nil {
+		t.Fatalf("NewManager failed: %v", err)
+	}
+	_, err = smartcache.Register[sample](mgr, "user", &smartcache.EntityOptions{TTL: ptr(time.Minute), Prefix: ptr("")})
+	if !errors.Is(err, smartcache.ErrEmptyPrefix) {
+		t.Errorf("Register with empty Prefix: got %v, want smartcache.ErrEmptyPrefix", err)
 	}
 }
 

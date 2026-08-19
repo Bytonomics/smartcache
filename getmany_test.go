@@ -272,7 +272,7 @@ func TestGetMany_CorruptEntry_Reloads(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := backing.Set(ctx, "gm-corrupt:a", []byte("not valid json{{{"), time.Minute); err != nil {
+	if err := backing.Set(ctx, "bc:gm-corrupt:a", []byte("not valid json{{{"), time.Minute); err != nil {
 		t.Fatalf("backing.Set failed: %v", err)
 	}
 
