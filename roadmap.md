@@ -84,6 +84,8 @@ smartcache became a central caching layer for many entity types at once.
 | [Cross-instance stampede protection](#cross-instance-stampede-protection) | ⚠️ | One reload across the whole fleet. |
 | [Two-level caching](#two-level-caching) | ⚠️ | In-process layer over the shared cache. |
 | [Bulk invalidation by group](#bulk-invalidation-by-group) | ⚠️ | Evict a whole family in one call. |
+| [Alias-based multi-key caching](#alias-based-multi-key-caching) | ⚠️ | One value, many lookup keys; delete by any cascades to all. |
+| [Bloom-filter alias routing](#bloom-filter-alias-routing) | ⚠️ | Skip the Lua path for provably-non-aliased keys. |
 | [Batch stampede protection](#batch-stampede-protection) | ⚠️ | Dedupe overlapping batch loads. |
 
 ### Store & operations
@@ -184,6 +186,12 @@ Problem: sometimes you must invalidate many related keys at once — everything 
 
 ### Batch stampede protection
 Problem: batch read-through does not dedupe across concurrent batch calls, so two overlapping batch look-ups each load the overlap. This extends the one-load-per-key idea to batches, so an id is loaded once even across concurrent batch calls. Value: the same stampede protection for batch reads that single-key reads already have.
+
+### Alias-based multi-key caching
+Problem: a record is often reachable by more than one key (a user by id, email, and slug), so a caller must write and invalidate every key by hand — miss one and it serves stale data. This lets the library associate many lookup keys with one value: the value is stored once at a primary key, each alias is a small pointer to it, and a per-primary members set indexes them. A delete or update through any key cascades to the whole group, cleaned atomically via a Lua script, with one shared TTL across every key. Opt-in via a dedicated `RegisterAliasGroup` constructor (one group per cache, name auto-derived); non-aliasing caches keep today's light path unchanged; single-process (mems4) is exact. Value: the caller stops tracking multi-key sets, and a missed invalidation can no longer leak or serve stale. Full design: `docs/1-alias-cache-design.md`.
+
+### Bloom-filter alias routing
+Problem: an alias-enabled cache routes even its plain, non-grouped keys through the Lua path — correct but wasteful. This adds an in-memory bloom filter that proves a key is definitely not grouped so it can skip Lua and use the light path — a pure performance optimization with no role in correctness. Deferred: an in-memory filter is per-process, so it is exact single-process but needs a warming strategy to be safe as a routing gate across instances; a cuckoo filter is recommended if immediate deletion is wanted. Value: cuts the grouped-path cost for non-aliased keys in an aliasing cache. Full analysis (memory math, cross-instance hazard, cuckoo recommendation): `docs/2-future-bloom-filter-routing.md`.
 
 ### Size-bounded in-memory cache
 Problem: the shipped in-memory store is unbounded — fine for tests, unsafe as a real in-process cache because it grows without limit. This adds a maximum size with automatic eviction of least-recently-used entries. Value: use the in-memory backend in production with a memory ceiling.
