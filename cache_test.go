@@ -815,8 +815,9 @@ func testNotUniqueKeyedPutValueReturnsError(t *testing.T) {
 	}
 }
 
-// testNotUniqueKeyedPutReturnsError verifies Put(ctx, writer) returns ErrNotUniqueKeyed
-// when T does not implement UniqueKeyed.
+// testNotUniqueKeyedPutReturnsError verifies Put(ctx, writer) on a non-UniqueKeyed T surfaces
+// ErrNotUniqueKeyed but still returns the committed value with WrittenNotCached — a committed
+// write must never be reported to the caller as a failed write.
 func testNotUniqueKeyedPutReturnsError(t *testing.T) {
 	mgr, err := smartcache.NewManager(memstore.New())
 	if err != nil {
@@ -836,11 +837,12 @@ func testNotUniqueKeyedPutReturnsError(t *testing.T) {
 	if !errors.Is(err, smartcache.ErrNotUniqueKeyed) {
 		t.Errorf("Put: got %v, want ErrNotUniqueKeyed", err)
 	}
-	if val != nil {
-		t.Errorf("Put value: got %v, want nil on error", val)
+	// The writer already committed; the value must be returned, not dropped.
+	if val == nil || val.N != 42 {
+		t.Errorf("Put value: got %v, want the committed value &{42}", val)
 	}
-	if outcome != smartcache.Written {
-		t.Errorf("Put outcome: got %v, want Written (attempt before key derivation)", outcome)
+	if outcome != smartcache.WrittenNotCached {
+		t.Errorf("Put outcome: got %v, want WrittenNotCached (write committed, cache skipped)", outcome)
 	}
 }
 

@@ -450,8 +450,9 @@ func (c *Cache[T]) populateLoaded(ctx context.Context, missing []string, loaded,
 	}
 }
 
-// uniqueKeyOf derives the cache key from a value's CacheUniqueKey(). Returns ErrNotUniqueKeyed
-// when the value is nil or T does not implement UniqueKeyed.
+// uniqueKeyOf derives the cache key from a value's CacheUniqueKey(). Returns ErrNilWrite when the
+// value is nil, or ErrNotUniqueKeyed when T does not implement UniqueKeyed or CacheUniqueKey()
+// is empty (an empty key has no identity and would collide distinct values on one key).
 func (c *Cache[T]) uniqueKeyOf(val *T) (string, error) {
 	if val == nil {
 		return "", ErrNilWrite
@@ -460,19 +461,31 @@ func (c *Cache[T]) uniqueKeyOf(val *T) (string, error) {
 	if !ok {
 		return "", ErrNotUniqueKeyed
 	}
-	return u.CacheUniqueKey(), nil
+	key := u.CacheUniqueKey()
+	if key == "" {
+		return "", ErrNotUniqueKeyed
+	}
+	return key, nil
 }
 
 // Put is the value-derived write-through: it runs writer, derives the key from the returned
-// value's CacheUniqueKey(), then caches it. Returns ErrNotUniqueKeyed if T is not UniqueKeyed.
+// value's CacheUniqueKey(), then caches it. If the writer committed but the key is underivable
+// (T is not UniqueKeyed, or CacheUniqueKey() is empty), it returns the value with WrittenNotCached
+// and ErrNotUniqueKeyed — the committed write is never reported as a failed write to the caller.
 func (c *Cache[T]) Put(ctx context.Context, writer Writer[T]) (*T, Outcome, error) {
 	val, err := writer(ctx)
 	if err != nil {
 		return nil, Written, err
 	}
+	if val == nil {
+		return nil, Written, ErrNilWrite
+	}
 	key, kErr := c.uniqueKeyOf(val)
 	if kErr != nil {
-		return nil, Written, kErr
+		// The real write already committed; an underivable key means we cannot cache the
+		// value, but a committed write must never look like a failed write to the caller.
+		c.metrics.recordOutcome(ctx, WrittenNotCached)
+		return val, WrittenNotCached, kErr
 	}
 	return c.PutByKey(ctx, key, func(context.Context) (*T, error) { return val, nil })
 }
