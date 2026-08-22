@@ -57,34 +57,6 @@ Background reading: [Cache stampede (Wikipedia)](https://en.wikipedia.org/wiki/C
 - **Pluggable `Codec`** — customize serialization. JSON is the default.
 - **Optional OpenTelemetry metrics** — configure `WithOTLP` on the `Manager` to export per-cache counters and a load-latency histogram, fire-and-forget on a background interval.
 
-## Failure Semantics
-
-- **Populate failures** — if the backend `Set` call fails after a loader runs, `GetByKey` still returns the loaded value and reports `Outcome == LoadedNotCached`. If the backend `Set` call fails after a writer runs, `PutByKey` still returns the written value and reports `Outcome == WrittenNotCached`. `GetManyByKey` applies the same rule per key. Neither the read nor the write fails — only caching the result failed.
-- **Writer failures** — if `writer` returns a non-nil error, `PutByKey` returns that error unchanged and the cache is left untouched. If `writer` returns `(nil, nil)`, `PutByKey` returns `ErrNilWrite` and the cache is left untouched — the cache is never set to a nil value.
-- **`GetManyByKey` load failures** — if `loadMissing` returns a non-nil error, `GetManyByKey` returns that error wrapped, with a nil result map — even the keys that were already cache hits are discarded, matching `GetByKey`'s "a failed load fails the call" behavior.
-- **`GetManyByKey` batch-read failures** — if the backend's batch read fails, every requested key is treated as a miss and loaded via `loadMissing`, exactly as if none of them were cached; the batch-read failure itself never surfaces to the caller.
-- **EvictByKey failures** — if a backend `Delete` call fails, the error is returned to the caller so it can retry or alert.
-- **Value-derived method failures** — when using `Put(ctx, writer)`, `PutValue(ctx, val)`, or `Evict(ctx, val)`, if `T` does not implement `UniqueKeyed`, these methods return `ErrNotUniqueKeyed`.
-- **TTL backstop** — the TTL bounds how long any missed or failed eviction can leave a stale value in the cache.
-
-## Outcomes
-
-`GetByKey`, `GetManyByKey`, and `PutByKey` each report an `Outcome` so callers can meter cache-hit rate and alert on populate failures. `GetByKey`/`GetManyByKey` never return a `PutByKey`-only outcome, and `PutByKey` never returns a `GetByKey`-only outcome — the two are read-side and write-side vocabularies, not interchangeable.
-
-`GetByKey` and `GetManyByKey` return (or, for `GetManyByKey`, meter per key) one of:
-
-- `Hit` — value was served from the cache (and not expired).
-- `Loaded` — a miss occurred, the loader ran, and the value was cached. `GetManyByKey` also reports `Loaded` for a key confirmed not-found in the source of truth (whether or not negative caching is enabled).
-- `LoadedNotCached` — a miss occurred, the loader ran, but the backend `Set` failed; the value is still returned, uncached.
-- `NegativeHit` — a previously cached "not found" was served.
-
-`PutByKey` returns one of:
-
-- `Written` — the writer ran and the value it returned was cached.
-- `WrittenNotCached` — the writer ran, but the backend `Set` failed; the value is still returned, uncached.
-
-`PutValue`, `Put` (value-derived), and `PutValueByKey` return only an `error` — they have no `Outcome`, since they perform no external write (or no external write separate from value derivation) to characterize.
-
 ## Usage
 
 Setup — one `Manager` and one `Cache[User]` registered on it, shared by every snippet below:
@@ -428,6 +400,36 @@ gRPC on a background interval (default 15s), fire-and-forget. Metrics are never 
 the cache's registered name — so cardinality stays bounded regardless of traffic. Call `Manager.Shutdown` on
 process exit to flush the final batch; it is a no-op when `WithOTLP` was never configured, so callers that don't
 need metrics pay no lifecycle cost.
+
+## Failure Semantics
+
+- **Populate failures** — if the backend `Set` call fails after a loader runs, `GetByKey` still returns the loaded value and reports `Outcome == LoadedNotCached`. If the backend `Set` call fails after a writer runs, `PutByKey` still returns the written value and reports `Outcome == WrittenNotCached`. `GetManyByKey` applies the same rule per key. Neither the read nor the write fails — only caching the result failed.
+- **Writer failures** — if `writer` returns a non-nil error, `PutByKey` returns that error unchanged and the cache is left untouched. If `writer` returns `(nil, nil)`, `PutByKey` returns `ErrNilWrite` and the cache is left untouched — the cache is never set to a nil value.
+- **`GetManyByKey` load failures** — if `loadMissing` returns a non-nil error, `GetManyByKey` returns that error wrapped, with a nil result map — even the keys that were already cache hits are discarded, matching `GetByKey`'s "a failed load fails the call" behavior.
+- **`GetManyByKey` batch-read failures** — if the backend's batch read fails, every requested key is treated as a miss and loaded via `loadMissing`, exactly as if none of them were cached; the batch-read failure itself never surfaces to the caller.
+- **EvictByKey failures** — if a backend `Delete` call fails, the error is returned to the caller so it can retry or alert.
+- **Value-derived method failures** — when using `Put(ctx, writer)`, `PutValue(ctx, val)`, or `Evict(ctx, val)`, if `T` does not implement `UniqueKeyed`, these methods return `ErrNotUniqueKeyed`.
+- **TTL backstop** — the TTL bounds how long any missed or failed eviction can leave a stale value in the cache.
+
+## Outcomes
+
+`GetByKey`, `GetManyByKey`, and `PutByKey` each report an `Outcome` so callers can meter cache-hit rate and alert on populate failures. `GetByKey`/`GetManyByKey` never return a `PutByKey`-only outcome, and `PutByKey` never returns a `GetByKey`-only outcome — the two are read-side and write-side vocabularies, not interchangeable.
+
+`GetByKey` and `GetManyByKey` return (or, for `GetManyByKey`, meter per key) one of:
+
+- `Hit` — value was served from the cache (and not expired).
+- `Loaded` — a miss occurred, the loader ran, and the value was cached. `GetManyByKey` also reports `Loaded` for a key confirmed not-found in the source of truth (whether or not negative caching is enabled).
+- `LoadedNotCached` — a miss occurred, the loader ran, but the backend `Set` failed; the value is still returned, uncached.
+- `NegativeHit` — a previously cached "not found" was served.
+
+`PutByKey` returns one of:
+
+- `Written` — the writer ran and the value it returned was cached.
+- `WrittenNotCached` — the writer ran, but the backend `Set` failed; the value is still returned, uncached.
+
+`PutValue`, `Put` (value-derived), and `PutValueByKey` return only an `error` — they have no `Outcome`, since they perform no external write (or no external write separate from value derivation) to characterize.
+
+
 
 ## Configuration
 
