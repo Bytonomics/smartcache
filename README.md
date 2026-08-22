@@ -7,6 +7,13 @@ title: "smartcache"
 
 A small Go cache library whose one generic, type-safe `Cache[T]` does **both read-through and write-through** over a **pluggable, backend-agnostic store** — so you stop re-implementing the miss → load → populate → invalidate dance for every entity, and you can swap Redis for in-memory (or your own backend) without touching a single call site.
 
+I built it after I realised that a bunch of work that I have been doing here and there for years, in multiple projects, may be reused across projects.
+
+I have written about this project on dev.to:
+
+Part 1: https://dev.to/tushar_bytonomics/let-us-talk-about-caching-29f7
+Part 2: https://dev.to/tushar_bytonomics/let-us-talk-about-caching-part-2-4l4m
+
 ## Install
 
 ```bash
