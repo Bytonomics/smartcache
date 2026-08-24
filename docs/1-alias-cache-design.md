@@ -788,7 +788,7 @@ tests the coverage pass surfaced as gaps).
 
 - The bloom-filter routing optimization (Section 10) — deferred; see companion doc + roadmap.
 - Cross-instance stampede protection and two-level caching — separate roadmap items.
-- Any cloud `Store` adapter, RBAC/authz re-basing, or consumer wiring in `smritea-cloud`.
+- Any cloud `Store` adapter, RBAC/authz re-basing, or downstream consumer wiring.
 - Automatic mode selection or migration between `AliasColocated` and `AliasSharded` for an
   existing entity — the mode is fixed at `RegisterAliasGroup` (Section 9) and does not change
   without a data migration. `AliasSharded` (Section 7) is the mitigation for a large or hot

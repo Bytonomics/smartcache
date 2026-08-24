@@ -92,7 +92,7 @@ fmt-check: ## Check formatting without writing (fails if unformatted files exist
 	@echo "All files formatted"
 
 # Pinned to match the version other Go submodules in this repo install (see
-# smritea-oss/pedantigo/validator/Makefile) — invoked by direct path, not via
+# smritea-oss/modules/golang/pedantigo/validator/Makefile) — invoked by direct path, not via
 # PATH resolution, so a stale golangci-lint elsewhere on PATH can never
 # silently shadow it and let a local `make lint` pass on issues CI would catch.
 GOLANGCI_LINT_VERSION := v2.12.2

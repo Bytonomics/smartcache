@@ -1,11 +1,41 @@
 ---
 type: Overview
 title: "smartcache"
+status: stable
+tags:
+- readme
+stale_after: 2026-12-31
+generated:
+  by: Tushar Dwivedi
+  at: 2026-08-25T00:00:00Z
 ---
 
 # smartcache
 
+
+| Section | What it covers |
+|---------|----------------|
+| [Install](#install) | Install |
+| [Why smartcache](#why-smartcache) | Most Go caching options are either a raw store (a Redis client, an in-memory map) that… |
+| [Core Concepts](#core-concepts) | Manager + Register — the only way to build a Cache[T]. A Manager holds the injected… |
+| [Failure Semantics](#failure-semantics) | Populate failures — if the backend Set call fails after a loader runs, GetByKey still… |
+| [Outcomes](#outcomes) | GetByKey, GetManyByKey, and PutByKey each report an Outcome so callers can meter… |
+| [Usage](#usage) | Setup — one Manager and one Cache[User] registered on it, shared by every snippet below: |
+| [Configuration](#configuration) | Every option is set at one of two levels: on the manager (a default inherited by every… |
+| [Examples](#examples) | Runnable, end-to-end examples live in examples/, demonstrating every method above —… |
+| [Implementation Notes](#implementation-notes) | The backend is an interface, so any store — or a fake, for tests — can replace Redis or… |
+| [Outcome reference](#outcome-reference) | GetByKey, GetManyByKey, and PutByKey return an Outcome (an int enum with a String()… |
+| [Error reference](#error-reference) | All sentinels are exported from the smartcache package; check them with errors.Is.… |
+| [License](#license) | MIT |
+
 A small Go cache library whose one generic, type-safe `Cache[T]` does **both read-through and write-through** over a **pluggable, backend-agnostic store** — so you stop re-implementing the miss → load → populate → invalidate dance for every entity, and you can swap Redis for in-memory (or your own backend) without touching a single call site.
+
+I built it after I realised that a bunch of work that I have been doing here and there for years, in multiple projects, may be reused across projects.
+
+I have written about this project on dev.to:
+
+- [Part 1](https://dev.to/tushar_bytonomics/let-us-talk-about-caching-29f7)
+- [Part 2](https://dev.to/tushar_bytonomics/let-us-talk-about-caching-part-2-4l4m)
 
 ## Install
 
@@ -586,7 +616,7 @@ achieved with no change to smartcache itself.
 
 ### Adapting another cache library
 
-To back `Cache[T]` with any existing Go cache (an LRU, `ristretto`, `bigcache`, `patrickmn/go-cache`, …), write a
+To back `Cache[T]` with any existing Go cache (an LRU, `ristretto`, `bigcache`, patrickmn/go-cache, …), write a
 small adapter type that implements `CacheStore` by calling into that library — the same pattern `memstore` and
 `redisstore` already use. `Get` must return `ErrStoreMiss` (not the underlying library's own miss value) so
 `Cache[T]` recognizes it as a read-through miss.
