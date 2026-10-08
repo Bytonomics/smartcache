@@ -28,10 +28,10 @@ func TestColocated_PutByAlias_EvalShape(t *testing.T) {
 		t.Fatalf("want 1 Eval, got %d", len(fc.evalCalls))
 	}
 	e := fc.evalCalls[0]
-	if len(e.keys) != 2 || e.keys[0] != "bc:{user}:5" || e.keys[1] != "bc:memb:{user}:5" {
+	if len(e.keys) != 2 || e.keys[0] != "bc::{user}::5" || e.keys[1] != "bc::memb::{user}::5" {
 		t.Errorf("keys: %v", e.keys)
 	}
-	if len(e.args) != 7 || e.args[1] != int64(60000) || e.args[2] != "email" || e.args[3] != "ada" || e.args[4] != "5" || e.args[5] != "bc:grp:{user}:" || e.args[6] != "bc:memb:{user}:" {
+	if len(e.args) != 7 || e.args[1] != int64(60000) || e.args[2] != "email" || e.args[3] != "ada" || e.args[4] != "5" || e.args[5] != "bc::grp::{user}::" || e.args[6] != "bc::memb::{user}::" {
 		t.Errorf("args: %v", e.args)
 	}
 }
@@ -44,10 +44,10 @@ func TestColocated_GetByAlias_EvalShape(t *testing.T) {
 		t.Fatalf("GetByAlias: %q err=%v", b, err)
 	}
 	e := fc.evalCalls[len(fc.evalCalls)-1]
-	if len(e.keys) != 1 || e.keys[0] != "bc:grp:{user}:email:ada" {
+	if len(e.keys) != 1 || e.keys[0] != "bc::grp::{user}::email::ada" {
 		t.Errorf("keys: %v", e.keys)
 	}
-	if len(e.args) != 1 || e.args[0] != "bc:{user}:" {
+	if len(e.args) != 1 || e.args[0] != "bc::{user}::" {
 		t.Errorf("args: %v", e.args)
 	}
 }
@@ -67,10 +67,10 @@ func TestColocated_EvictByPrimary_EvalShape(t *testing.T) {
 		t.Fatalf("EvictByPrimary: %v", err)
 	}
 	e := fc.evalCalls[len(fc.evalCalls)-1]
-	if len(e.keys) != 2 || e.keys[0] != "bc:{user}:5" || e.keys[1] != "bc:memb:{user}:5" {
+	if len(e.keys) != 2 || e.keys[0] != "bc::{user}::5" || e.keys[1] != "bc::memb::{user}::5" {
 		t.Errorf("keys: %v", e.keys)
 	}
-	if len(e.args) != 1 || e.args[0] != "bc:grp:{user}:" {
+	if len(e.args) != 1 || e.args[0] != "bc::grp::{user}::" {
 		t.Errorf("args: %v", e.args)
 	}
 }
@@ -82,10 +82,10 @@ func TestColocated_EvictByAlias_EvalShape(t *testing.T) {
 		t.Fatalf("EvictByAlias: %v", err)
 	}
 	e := fc.evalCalls[len(fc.evalCalls)-1]
-	if len(e.keys) != 1 || e.keys[0] != "bc:grp:{user}:email:ada" {
+	if len(e.keys) != 1 || e.keys[0] != "bc::grp::{user}::email::ada" {
 		t.Errorf("keys: %v", e.keys)
 	}
-	if len(e.args) != 3 || e.args[0] != "bc:{user}:" || e.args[1] != "bc:memb:{user}:" || e.args[2] != "bc:grp:{user}:" {
+	if len(e.args) != 3 || e.args[0] != "bc::{user}::" || e.args[1] != "bc::memb::{user}::" || e.args[2] != "bc::grp::{user}::" {
 		t.Errorf("args: %v", e.args)
 	}
 }
@@ -103,7 +103,7 @@ func TestSharded_GetByAlias_ResolveThenValidate(t *testing.T) {
 		t.Fatalf("want 1 validate Eval, got %d", len(fc.evalCalls))
 	}
 	e := fc.evalCalls[0]
-	if len(e.keys) != 2 || e.keys[0] != "bc:{user:5}" || e.keys[1] != "bc:memb:{user:5}" {
+	if len(e.keys) != 2 || e.keys[0] != "bc::{user::5}" || e.keys[1] != "bc::memb::{user::5}" {
 		t.Errorf("validate keys: %v", e.keys)
 	}
 	if len(e.args) != 2 || e.args[0] != "email" || e.args[1] != "ada" {
@@ -132,13 +132,13 @@ func TestSharded_PutByAlias_RecordThenPointer(t *testing.T) {
 		t.Fatalf("want 1 record Eval, got %d", len(fc.evalCalls))
 	}
 	e := fc.evalCalls[0]
-	if len(e.keys) != 2 || e.keys[0] != "bc:{user:5}" || e.keys[1] != "bc:memb:{user:5}" {
+	if len(e.keys) != 2 || e.keys[0] != "bc::{user::5}" || e.keys[1] != "bc::memb::{user::5}" {
 		t.Errorf("record keys: %v", e.keys)
 	}
 	if len(e.args) != 4 || e.args[1] != int64(60000) || e.args[2] != "email" || e.args[3] != "ada" {
 		t.Errorf("record args: %v", e.args)
 	}
-	if len(fc.setCalls) != 1 || fc.setCalls[0].key != "bc:grp:{user:email:ada}" || fc.setCalls[0].val != "5" {
+	if len(fc.setCalls) != 1 || fc.setCalls[0].key != "bc::grp::{user::email::ada}" || fc.setCalls[0].val != "5" {
 		t.Errorf("pointer Set: %+v", fc.setCalls)
 	}
 }
@@ -154,11 +154,11 @@ func TestSharded_EvictByPrimary_EvictThenCompareDelete(t *testing.T) {
 		t.Fatalf("want record-evict + 1 compare-delete Eval, got %d", len(fc.evalCalls))
 	}
 	rec := fc.evalCalls[0]
-	if len(rec.keys) != 2 || rec.keys[0] != "bc:{user:5}" || rec.keys[1] != "bc:memb:{user:5}" {
+	if len(rec.keys) != 2 || rec.keys[0] != "bc::{user::5}" || rec.keys[1] != "bc::memb::{user::5}" {
 		t.Errorf("record-evict keys: %v", rec.keys)
 	}
 	cdel := fc.evalCalls[1]
-	if len(cdel.keys) != 1 || cdel.keys[0] != "bc:grp:{user:email:ada}" {
+	if len(cdel.keys) != 1 || cdel.keys[0] != "bc::grp::{user::email::ada}" {
 		t.Errorf("compare-delete keys: %v", cdel.keys)
 	}
 	if len(cdel.args) != 1 || cdel.args[0] != "5" {
@@ -176,7 +176,7 @@ func TestSharded_EvictByAlias_ResolvesAndEvicts(t *testing.T) {
 		t.Fatalf("want record-evict + 1 compare-delete Eval, got %d", len(fc.evalCalls))
 	}
 	rec := fc.evalCalls[0]
-	if len(rec.keys) != 2 || rec.keys[0] != "bc:{user:5}" || rec.keys[1] != "bc:memb:{user:5}" {
+	if len(rec.keys) != 2 || rec.keys[0] != "bc::{user::5}" || rec.keys[1] != "bc::memb::{user::5}" {
 		t.Errorf("record-evict keys: %v", rec.keys)
 	}
 }

@@ -6,10 +6,10 @@ local grpx, mpx = ARGV[6], ARGV[7]
 if ttl and ttl > 0 then redis.call('SET', vkey, val, 'PX', ttl) else redis.call('SET', vkey, val) end
 
 if field ~= '' then
-  local pkey = grpx .. field .. ':' .. aval
+  local pkey = grpx .. field .. '::' .. aval
   local oldVal = redis.call('HGET', mkey, field)
   if oldVal and oldVal ~= aval then
-    redis.call('DEL', grpx .. field .. ':' .. oldVal)
+    redis.call('DEL', grpx .. field .. '::' .. oldVal)
   end
   local oldPk = redis.call('GET', pkey)
   if oldPk and oldPk ~= pk then
@@ -23,13 +23,13 @@ if ttl and ttl > 0 then
   redis.call('PEXPIRE', mkey, ttl)
   local all = redis.call('HGETALL', mkey)
   for i = 1, #all, 2 do
-    redis.call('PEXPIRE', grpx .. all[i] .. ':' .. all[i + 1], ttl)
+    redis.call('PEXPIRE', grpx .. all[i] .. '::' .. all[i + 1], ttl)
   end
 else
   redis.call('PERSIST', mkey)
   local all = redis.call('HGETALL', mkey)
   for i = 1, #all, 2 do
-    redis.call('PERSIST', grpx .. all[i] .. ':' .. all[i + 1])
+    redis.call('PERSIST', grpx .. all[i] .. '::' .. all[i + 1])
   end
 end
 return 1

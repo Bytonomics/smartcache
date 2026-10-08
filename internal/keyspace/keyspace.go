@@ -10,37 +10,37 @@ const (
 	membSeg      = "memb" // members-hash segment
 )
 
-// NonAliasKey builds a plain (non-alias) cache value key: bc:<ns>:<key>.
+// NonAliasKey builds a plain (non-alias) cache value key: bc::<ns>::<key>.
 func NonAliasKey(ns, key string) string {
-	return globalPrefix + ":" + ns + ":" + key
+	return globalPrefix + "::" + ns + "::" + key
 }
 
 // ValueKey builds the value key for one alias-group record.
-// Colocated (sharded=false): bc:{ns}:<pk>  — the whole entity shares one slot.
-// Sharded   (sharded=true):  bc:{ns:pk}     — one slot per record.
+// Colocated (sharded=false): bc::{ns}::<pk>  — the whole entity shares one slot.
+// Sharded   (sharded=true):  bc::{ns::<pk>}     — one slot per record.
 func ValueKey(ns, pk string, sharded bool) string {
 	if sharded {
-		return globalPrefix + ":{" + ns + ":" + pk + "}"
+		return globalPrefix + "::{" + ns + "::" + pk + "}"
 	}
-	return globalPrefix + ":{" + ns + "}:" + pk
+	return globalPrefix + "::{" + ns + "}::" + pk
 }
 
 // MembersKey builds the members-HASH key (field -> aliasValue) for one record.
-// Colocated: bc:memb:{ns}:<pk> ; Sharded: bc:memb:{ns:pk}.
+// Colocated: bc::memb::{ns}::<pk> ; Sharded: bc::memb::{ns::<pk>}.
 func MembersKey(ns, pk string, sharded bool) string {
 	if sharded {
-		return globalPrefix + ":" + membSeg + ":{" + ns + ":" + pk + "}"
+		return globalPrefix + "::" + membSeg + "::{" + ns + "::" + pk + "}"
 	}
-	return globalPrefix + ":" + membSeg + ":{" + ns + "}:" + pk
+	return globalPrefix + "::" + membSeg + "::{" + ns + "}::" + pk
 }
 
 // PointerKey builds a reverse alias pointer key (its value is the primary key).
-// Colocated: bc:grp:{ns}:<field>:<value> ; Sharded: bc:grp:{ns:field:value}.
+// Colocated: bc::grp::{ns}::<field>::<value> ; Sharded: bc::grp::{ns::<field>::<value>}.
 func PointerKey(ns, field, value string, sharded bool) string {
 	if sharded {
-		return globalPrefix + ":" + grpSeg + ":{" + ns + ":" + field + ":" + value + "}"
+		return globalPrefix + "::" + grpSeg + "::{" + ns + "::" + field + "::" + value + "}"
 	}
-	return globalPrefix + ":" + grpSeg + ":{" + ns + "}:" + field + ":" + value
+	return globalPrefix + "::" + grpSeg + "::{" + ns + "}::" + field + "::" + value
 }
 
 // The three Colocated-only prefixes let the single-slot Colocated Lua rebuild sibling keys
@@ -48,17 +48,17 @@ func PointerKey(ns, field, value string, sharded bool) string {
 // pointer key from a field+value. Sharded never needs these (its reverse pointer stores the pk
 // directly and its record ops rebuild keys from that pk via ValueKey/MembersKey).
 
-// ColocatedValuePrefix returns bc:{ns}:  (value key = prefix + pk).
+// ColocatedValuePrefix returns bc::{ns}::  (value key = prefix + pk).
 func ColocatedValuePrefix(ns string) string {
-	return globalPrefix + ":{" + ns + "}:"
+	return globalPrefix + "::{" + ns + "}::"
 }
 
-// ColocatedMembersPrefix returns bc:memb:{ns}:  (members key = prefix + pk).
+// ColocatedMembersPrefix returns bc::memb::{ns}::  (members key = prefix + pk).
 func ColocatedMembersPrefix(ns string) string {
-	return globalPrefix + ":" + membSeg + ":{" + ns + "}:"
+	return globalPrefix + "::" + membSeg + "::{" + ns + "}::"
 }
 
-// ColocatedGrpPrefix returns bc:grp:{ns}:  (pointer key = prefix + field + ":" + value).
+// ColocatedGrpPrefix returns bc::grp::{ns}::  (pointer key = prefix + field + "::" + value).
 func ColocatedGrpPrefix(ns string) string {
-	return globalPrefix + ":" + grpSeg + ":{" + ns + "}:"
+	return globalPrefix + "::" + grpSeg + "::{" + ns + "}::"
 }

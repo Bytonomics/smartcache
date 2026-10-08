@@ -96,8 +96,8 @@ func TestRegister_DefaultPrefixFromName(t *testing.T) {
 	if err := c.PutValueByKey(ctx, "42", &sample{N: 1}); err != nil {
 		t.Fatalf("PutValue failed: %v", err)
 	}
-	if len(store.setKeys) == 0 || store.setKeys[len(store.setKeys)-1] != "bc:user:42" {
-		t.Errorf("stored key: got %v, want last entry %q (default prefix is the registered name)", store.setKeys, "bc:user:42")
+	if len(store.setKeys) == 0 || store.setKeys[len(store.setKeys)-1] != "bc::user::42" {
+		t.Errorf("stored key: got %v, want last entry %q (default prefix is the registered name)", store.setKeys, "bc::user::42")
 	}
 }
 
@@ -118,8 +118,8 @@ func TestRegister_PrefixOverride(t *testing.T) {
 	if err := c.PutValueByKey(ctx, "42", &sample{N: 1}); err != nil {
 		t.Fatalf("PutValue failed: %v", err)
 	}
-	if len(store.setKeys) == 0 || store.setKeys[len(store.setKeys)-1] != "bc:custom:42" {
-		t.Errorf("stored key: got %v, want last entry %q", store.setKeys, "bc:custom:42")
+	if len(store.setKeys) == 0 || store.setKeys[len(store.setKeys)-1] != "bc::custom::42" {
+		t.Errorf("stored key: got %v, want last entry %q", store.setKeys, "bc::custom::42")
 	}
 }
 
