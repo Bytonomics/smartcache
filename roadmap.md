@@ -71,6 +71,14 @@ smartcache became a central caching layer for many entity types at once.
 | [Anti-synchronized-expiry (TTL jitter)](#anti-synchronized-expiry-ttl-jitter) | ✅ | Spread expiry to avoid mass stampede. |
 | [Built-in metrics export](#built-in-metrics-export) | ✅ | Per-cache OpenTelemetry metrics. |
 
+### Milestone 4 — Prefix eviction
+
+Bulk delete by a shared key prefix.
+
+| Feature | Status | In short |
+|---|---|---|
+| [Bulk delete by key prefix](#bulk-delete-by-key-prefix) | ✅ | Evict every entry whose key starts with a prefix. |
+
 ---
 
 ## Planned
@@ -174,6 +182,9 @@ Each entry's lifetime is shortened by a small random amount by default. A batch 
 ### Built-in metrics export
 Point a manager at an OpenTelemetry endpoint and it exports per-cache counters (hit, miss, load, load-error, eviction) and a load-latency measure, in the background, with no manual wiring and no logging. Caches without metrics configured pay nothing.
 
+### Bulk delete by key prefix
+Delete every entry of a cache whose key starts with a given prefix, in one call — for example everything cached for one tenant when its keys are built as `<tenantID>::<id>`. It works for plain caches and for alias-group caches (where the prefix applies to the primary key and each record is removed together with its members hash and alias pointers). The prefix is literal, an empty prefix is rejected, and a prefix containing the wildcard '*' is rejected, and a store without the capability reports that it is unsupported. `memstore` and `redisstore` both implement it; on Redis it uses `SCAN` and one `DEL` per key, so it is meant for rare bulk operations such as erasing a tenant, not for the request hot path. The eviction counter grows by the number of entries removed.
+
 ### Serve-stale-while-refreshing
 Problem: when an entry expires, the next reader waits for a fresh load (a latency spike), and if the source is down the read fails. This gives an entry a soft and a hard expiry: past the soft expiry the value is stale-but-usable — return it at once and refresh in the background; only past the hard expiry is it gone. If a refresh fails, keep serving the last good value. Value: no latency spike at expiry, and reads survive a brief source outage.
 
@@ -187,7 +198,7 @@ Problem: today's stampede protection dedupes loads within one process, so with N
 Problem: even a Redis hit costs a network round-trip. This puts a small in-process cache in front of the shared cache: reads check the in-process layer first and fall through on a miss. It needs an in-process invalidation plan — a short local lifetime, or a notify-on-write signal. Value: cuts round-trips and latency for very hot keys and offloads the shared cache.
 
 ### Bulk invalidation by group
-Problem: sometimes you must invalidate many related keys at once — everything for a tenant, or all of a user's data when their membership changes — and today you would evict each key individually. This tags keys with a group and evicts the whole group in one call (via a per-tag key set, or a versioned prefix). Value: one call invalidates a whole family — what a tenant/permission fan-out needs for correctness.
+Problem: sometimes you must invalidate many related keys at once — everything for a tenant, or all of a user's data when their membership changes — and today you would evict each key individually. This tags keys with a group and evicts the whole group in one call (via a per-tag key set, or a versioned prefix). Value: one call invalidates a whole family — what a tenant/permission fan-out needs for correctness. Prefix eviction ([Bulk delete by key prefix](#bulk-delete-by-key-prefix)) already covers the bulk case where the related keys share a key prefix; tag-based groups, for families that share no prefix, remain planned.
 
 ### Batch stampede protection
 Problem: batch read-through does not dedupe across concurrent batch calls, so two overlapping batch look-ups each load the overlap. This extends the one-load-per-key idea to batches, so an id is loaded once even across concurrent batch calls. Value: the same stampede protection for batch reads that single-key reads already have.

@@ -33,6 +33,17 @@ type BatchCacheStore interface {
 	GetMany(ctx context.Context, keys []string) (map[string][]byte, error)
 }
 
+// PrefixCacheStore is an optional extension of CacheStore for backends that can delete every key
+// that starts with a given prefix. Cache.EvictByKeyPrefix uses it for NON-alias caches. keyPrefix is
+// a complete, literal storage-key prefix built by Cache from internal/keyspace. It is never a glob
+// pattern: a store must treat every character in it literally. DeleteByPrefix returns the number of
+// entries it removed. It may use a full key scan, so callers use it for rare bulk operations only.
+type PrefixCacheStore interface {
+	CacheStore
+	// DeleteByPrefix removes every key that starts with keyPrefix and returns how many it removed.
+	DeleteByPrefix(ctx context.Context, keyPrefix string) (int64, error)
+}
+
 // Codec serializes cached values to and from bytes. The default (when
 // Options.Codec is nil) is encoding/json.
 type Codec interface {

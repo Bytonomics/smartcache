@@ -64,4 +64,16 @@ var (
 	// value instead of a key) when the cached type T does not implement UniqueKeyed. The *ByKey
 	// variants (GetByKey/PutByKey/PutValueByKey/EvictByKey/EvictManyByKey/GetManyByKey) work for any T.
 	ErrNotUniqueKeyed = errors.New("smartcache: value type does not implement UniqueKeyed (CacheUniqueKey() string)")
+
+	// ErrEmptyKeyPrefix is returned by EvictByKeyPrefix when keyPrefix is empty. An empty prefix
+	// would match every entry of the cache, so it is rejected instead of silently flushing it.
+	ErrEmptyKeyPrefix = errors.New("smartcache: key prefix must not be empty")
+
+	// ErrPrefixEvictNotSupported is returned by EvictByKeyPrefix when the manager's store (or, for an
+	// alias-group cache, its AliasOps) does not implement prefix eviction, or when the store's
+	// connection cannot scan keys.
+	ErrPrefixEvictNotSupported = errors.New("smartcache: store does not support prefix eviction")
+
+	// ErrWildcardKeyPrefix is returned by EvictByKeyPrefix when keyPrefix contains the wildcard '*'. A key prefix is always literal; rejecting '*' means a caller can never ask for a pattern.
+	ErrWildcardKeyPrefix = errors.New("smartcache: key prefix must not contain the wildcard '*'")
 )

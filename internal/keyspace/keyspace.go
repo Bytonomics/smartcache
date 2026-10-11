@@ -4,6 +4,8 @@
 // strategy is passed as a plain bool `sharded`.
 package keyspace
 
+import "strings"
+
 const (
 	globalPrefix = "bc"   // Bytonomics Cache — top-level namespace on every key
 	grpSeg       = "grp"  // reverse alias-pointer segment
@@ -61,4 +63,65 @@ func ColocatedMembersPrefix(ns string) string {
 // ColocatedGrpPrefix returns bc::grp::{ns}::  (pointer key = prefix + field + "::" + value).
 func ColocatedGrpPrefix(ns string) string {
 	return globalPrefix + "::" + grpSeg + "::{" + ns + "}::"
+}
+
+// Match describes a family of keys by a literal Prefix and a literal Suffix: a key is in the family
+// when it has both. Neither field contains wildcards. Stores turn a Match into a backend pattern
+// (redisstore: a glob; memstore: string comparison).
+type Match struct {
+	Prefix string
+	Suffix string
+}
+
+// Contains reports whether key belongs to the family.
+func (m Match) Contains(key string) bool {
+	return len(key) >= len(m.Prefix)+len(m.Suffix) &&
+		strings.HasPrefix(key, m.Prefix) && strings.HasSuffix(key, m.Suffix)
+}
+
+// NonAliasKeyPrefix is the literal storage prefix of every plain-cache key of ns whose logical key
+// starts with keyPrefix: bc::<ns>::<keyPrefix>.
+func NonAliasKeyPrefix(ns, keyPrefix string) string {
+	return globalPrefix + "::" + ns + "::" + keyPrefix
+}
+
+// ValueMatch matches every alias-group value key of ns whose primary key starts with pkPrefix.
+// Colocated: {Prefix: "bc::{"+ns+"}::"+pkPrefix, Suffix: ""}.
+// Sharded:   {Prefix: "bc::{"+ns+"::"+pkPrefix, Suffix: "}"}.
+func ValueMatch(ns, pkPrefix string, sharded bool) Match {
+	if sharded {
+		return Match{Prefix: globalPrefix + "::{" + ns + "::" + pkPrefix, Suffix: "}"}
+	}
+	return Match{Prefix: globalPrefix + "::{" + ns + "}::" + pkPrefix}
+}
+
+// MembersMatch matches every alias-group members-hash key of ns whose primary key starts with pkPrefix.
+// Colocated: {Prefix: "bc::memb::{"+ns+"}::"+pkPrefix, Suffix: ""}.
+// Sharded:   {Prefix: "bc::memb::{"+ns+"::"+pkPrefix, Suffix: "}"}.
+func MembersMatch(ns, pkPrefix string, sharded bool) Match {
+	if sharded {
+		return Match{Prefix: globalPrefix + "::" + membSeg + "::{" + ns + "::" + pkPrefix, Suffix: "}"}
+	}
+	return Match{Prefix: globalPrefix + "::" + membSeg + "::{" + ns + "}::" + pkPrefix}
+}
+
+// PrimaryFromValueKey is the inverse of ValueKey: it returns the primary key inside a value key of
+// ns and true, or "" and false when key is not a value key of ns for that mode.
+func PrimaryFromValueKey(ns, key string, sharded bool) (string, bool) {
+	return primaryOf(ValueMatch(ns, "", sharded), key)
+}
+
+// PrimaryFromMembersKey is the inverse of MembersKey: it returns the primary key inside a members
+// key of ns and true, or "" and false when key is not a members key of ns for that mode.
+func PrimaryFromMembersKey(ns, key string, sharded bool) (string, bool) {
+	return primaryOf(MembersMatch(ns, "", sharded), key)
+}
+
+// primaryOf returns the text that m's Prefix and Suffix wrap around key, and true. It returns "" and
+// false when key is outside m's family.
+func primaryOf(m Match, key string) (string, bool) {
+	if !m.Contains(key) {
+		return "", false
+	}
+	return key[len(m.Prefix) : len(key)-len(m.Suffix)], true
 }

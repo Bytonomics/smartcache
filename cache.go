@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -109,7 +110,9 @@ type Options struct {
 // CacheStore. It is constructed only via Register on a Manager, never directly.
 type Cache[T any] struct {
 	store          CacheStore
-	batch          BatchCacheStore // non-nil only when store implements BatchCacheStore
+	batch          BatchCacheStore  // non-nil only when store implements BatchCacheStore
+	prefixStore    PrefixCacheStore // non-nil only when store implements PrefixCacheStore
+	prefixAlias    PrefixAliasOps   // non-nil only for alias-group caches whose AliasOps implements PrefixAliasOps
 	opts           Options
 	codec          Codec
 	group          *singleflight.Group
@@ -314,6 +317,48 @@ func (c *Cache[T]) EvictManyByKey(ctx context.Context, keys ...string) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// EvictByKeyPrefix deletes every cache entry whose logical key starts with keyPrefix, including
+// cached not-found (negative) markers. For an alias-group cache, keyPrefix is matched against the
+// primary key, and each matching record is evicted together with its members hash and alias
+// pointers. It returns the number removed: keys for a plain cache, records for an alias group.
+//
+// keyPrefix is literal. A keyPrefix that contains '*' returns ErrWildcardKeyPrefix, so a caller can
+// never ask for a pattern; the other glob characters ('?', '[', ']' and '\') are matched literally.
+// An empty keyPrefix returns ErrEmptyKeyPrefix, because it would match every entry. A store that cannot
+// prefix-delete returns ErrPrefixEvictNotSupported. If the store fails partway through, the count removed so far
+// is returned together with the joined error. Entries that a failed call left behind expire when
+// their TTL backstop elapses, which bounds how stale they can get.
+//
+// Prefix eviction scans the keyspace on Redis. It is a rare bulk operation (for example, erasing
+// one tenant's data), never for the request hot path.
+func (c *Cache[T]) EvictByKeyPrefix(ctx context.Context, keyPrefix string) (int64, error) {
+	if keyPrefix == "" {
+		return 0, ErrEmptyKeyPrefix
+	}
+	if strings.Contains(keyPrefix, "*") {
+		return 0, ErrWildcardKeyPrefix
+	}
+	n, err := c.evictPrefix(ctx, keyPrefix)
+	if n > 0 {
+		c.metrics.recordEvict(ctx, n)
+	}
+	return n, err
+}
+
+// evictPrefix routes a prefix eviction to the alias-group strategy or to the plain-cache store.
+func (c *Cache[T]) evictPrefix(ctx context.Context, keyPrefix string) (int64, error) {
+	if c.isAliasGroup {
+		if c.prefixAlias == nil {
+			return 0, ErrPrefixEvictNotSupported
+		}
+		return c.prefixAlias.EvictByPrimaryPrefix(ctx, keyPrefix)
+	}
+	if c.prefixStore == nil {
+		return 0, ErrPrefixEvictNotSupported
+	}
+	return c.prefixStore.DeleteByPrefix(ctx, keyspace.NonAliasKeyPrefix(c.opts.Prefix, keyPrefix))
 }
 
 // GetManyByKey reads several keys in one batch: cache hits (and warm negative

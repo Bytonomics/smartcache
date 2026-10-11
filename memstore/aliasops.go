@@ -2,6 +2,7 @@ package memstore
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/Bytonomics/smartcache"
@@ -16,7 +17,10 @@ type memAliasOps struct {
 	sharded bool
 }
 
-var _ smartcache.AliasOps = (*memAliasOps)(nil)
+var (
+	_ smartcache.AliasOps       = (*memAliasOps)(nil)
+	_ smartcache.PrefixAliasOps = (*memAliasOps)(nil)
+)
 
 func (o *memAliasOps) valueKey(pk string) string   { return keyspace.ValueKey(o.ns, pk, o.sharded) }
 func (o *memAliasOps) membersKey(pk string) string { return keyspace.MembersKey(o.ns, pk, o.sharded) }
@@ -96,6 +100,31 @@ func (o *memAliasOps) EvictByPrimary(ctx context.Context, primary string) error 
 	defer o.s.mu.Unlock()
 	o.evictLocked(primary)
 	return nil
+}
+
+// EvictByPrimaryPrefix removes every record whose primary key starts with primaryPrefix (a literal
+// prefix), cascading to each record's members hash and alias pointers exactly like EvictByPrimary.
+// It does not require the record's value to be unexpired. It returns the number of distinct records
+// removed: a record counts when its value or its members hash was present.
+func (o *memAliasOps) EvictByPrimaryPrefix(ctx context.Context, primaryPrefix string) (int64, error) {
+	o.s.mu.Lock()
+	defer o.s.mu.Unlock()
+	// Collect the matching primaries first, then evict, so no map is mutated while it is ranged.
+	primaries := make(map[string]struct{})
+	for k := range o.s.data {
+		if pk, ok := keyspace.PrimaryFromValueKey(o.ns, k, o.sharded); ok && strings.HasPrefix(pk, primaryPrefix) {
+			primaries[pk] = struct{}{}
+		}
+	}
+	for mk := range o.s.members {
+		if pk, ok := keyspace.PrimaryFromMembersKey(o.ns, mk, o.sharded); ok && strings.HasPrefix(pk, primaryPrefix) {
+			primaries[pk] = struct{}{}
+		}
+	}
+	for pk := range primaries {
+		o.evictLocked(pk)
+	}
+	return int64(len(primaries)), nil
 }
 
 func (o *memAliasOps) EvictByAlias(ctx context.Context, ref smartcache.AliasRef) error {

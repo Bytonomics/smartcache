@@ -5,6 +5,7 @@ package memstore
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,9 +33,10 @@ type membersHash struct {
 }
 
 var (
-	_ smartcache.CacheStore      = (*store)(nil)
-	_ smartcache.BatchCacheStore = (*store)(nil)
-	_ smartcache.AliasCacheStore = (*store)(nil)
+	_ smartcache.CacheStore       = (*store)(nil)
+	_ smartcache.BatchCacheStore  = (*store)(nil)
+	_ smartcache.AliasCacheStore  = (*store)(nil)
+	_ smartcache.PrefixCacheStore = (*store)(nil)
 )
 
 // New returns a new in-memory smartcache.CacheStore.
@@ -89,6 +91,23 @@ func (s *store) Delete(ctx context.Context, key string) error {
 	delete(s.data, key)
 	s.mu.Unlock()
 	return nil
+}
+
+// DeleteByPrefix removes every entry whose storage key starts with keyPrefix (a literal prefix) and returns how many unexpired entries it removed. Expired entries that match are deleted too but not counted. ctx is unused (an in-memory scan does not block).
+func (s *store) DeleteByPrefix(ctx context.Context, keyPrefix string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var removed int64
+	for key, e := range s.data {
+		if !strings.HasPrefix(key, keyPrefix) {
+			continue
+		}
+		if !aliasExpired(e.expiresAt) {
+			removed++
+		}
+		delete(s.data, key) // deleting during range is safe; members are untouched
+	}
+	return removed, nil
 }
 
 func (s *store) Exists(ctx context.Context, key string) (bool, error) {

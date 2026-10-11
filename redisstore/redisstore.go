@@ -31,9 +31,10 @@ type store struct {
 }
 
 var (
-	_ smartcache.CacheStore      = (*store)(nil)
-	_ smartcache.BatchCacheStore = (*store)(nil)
-	_ smartcache.AliasCacheStore = (*store)(nil)
+	_ smartcache.CacheStore       = (*store)(nil)
+	_ smartcache.BatchCacheStore  = (*store)(nil)
+	_ smartcache.AliasCacheStore  = (*store)(nil)
+	_ smartcache.PrefixCacheStore = (*store)(nil)
 )
 
 // New returns a smartcache.CacheStore backed by conn.
@@ -100,4 +101,33 @@ func (s *store) GetMany(ctx context.Context, keys []string) (map[string][]byte, 
 		}
 	}
 	return out, nil
+}
+
+// DeleteByPrefix removes every key that starts with the literal keyPrefix. It finds the keys with
+// SCAN and deletes them one DEL per key, so Redis Cluster never receives a cross-slot command. It
+// returns the number of keys deleted. A connection that does not implement KeyScanner yields
+// smartcache.ErrPrefixEvictNotSupported. A failed DEL does not stop the sweep: the remaining keys
+// are still deleted, and the joined errors are returned together with the count.
+func (s *store) DeleteByPrefix(ctx context.Context, keyPrefix string) (int64, error) {
+	sc, ok := s.conn.(KeyScanner)
+	if !ok {
+		return 0, smartcache.ErrPrefixEvictNotSupported
+	}
+	var deleted int64
+	var errs []error
+	scanErr := sc.ScanKeys(ctx, globLiteral(keyPrefix)+"*", func(keys []string) error {
+		for _, k := range keys {
+			n, err := s.conn.Del(ctx, k).Result()
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			deleted += n
+		}
+		return nil
+	})
+	if scanErr != nil {
+		errs = append(errs, scanErr)
+	}
+	return deleted, errors.Join(errs...)
 }

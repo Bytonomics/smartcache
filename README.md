@@ -71,7 +71,7 @@ Background reading: [Cache stampede (Wikipedia)](https://en.wikipedia.org/wiki/C
 
 - **`Manager` + `Register`** — the only way to build a `Cache[T]`. A `Manager` holds the injected `CacheStore`, a set of default options, and (optionally) an OpenTelemetry metrics exporter; `Register[T]` creates one named `Cache[T]` on it, inheriting the manager's defaults unless you override them for that entity.
 - **`CacheStore` interface** — the injected cache backend (never the application's own database). `memstore` (in-memory) and `redisstore` (go-redis) are provided; bring your own implementation for any other system.
-- **Generic `Cache[T]`** — read-through `GetByKey`/`GetManyByKey` with a loader function; write-through `PutByKey` with a writer function; `PutValue` to cache a value you already hold, with no external write; `EvictByKey` and `EvictManyByKey` for delete-on-write; value-derived `Put`, `PutValue`, and `Evict` methods that derive the cache key from `val.CacheUniqueKey()`.
+- **Generic `Cache[T]`** — read-through `GetByKey`/`GetManyByKey` with a loader function; write-through `PutByKey` with a writer function; `PutValue` to cache a value you already hold, with no external write; `EvictByKey` and `EvictManyByKey` for delete-on-write; `EvictByKeyPrefix` to delete every entry whose key starts with a given prefix (a rare bulk operation, for example erasing one tenant); value-derived `Put`, `PutValue`, and `Evict` methods that derive the cache key from `val.CacheUniqueKey()`.
 - **`RegisterAliasGroup` + alias groups** — an opt-in second constructor for a value reachable by several lookup keys (id, email, slug, …), where a write or delete through any one of them keeps the rest consistent — requires `T` to implement `UniqueKeyed`; pick per-cache slot placement with AliasMode (Colocated vs Sharded) for Redis Cluster — see [`RegisterAliasGroup`](#registeraliasgroup--one-value-many-lookup-keys).
 - **Required positive TTL backstop** — the resolved `TTL` must be positive. Opt in to no expiry via `AllowInfinite: true`.
 - **Downward-only TTL jitter** — both `TTL` and `NegativeTTL` are independently shaved down by a random fraction (default 10%, configurable, 0 disables) so keys written together don't all expire in sync.
@@ -87,6 +87,7 @@ Background reading: [Cache stampede (Wikipedia)](https://en.wikipedia.org/wiki/C
 - **`GetManyByKey` load failures** — if `loadMissing` returns a non-nil error, `GetManyByKey` returns that error wrapped, with a nil result map — even the keys that were already cache hits are discarded, matching `GetByKey`'s "a failed load fails the call" behavior.
 - **`GetManyByKey` batch-read failures** — if the backend's batch read fails, every requested key is treated as a miss and loaded via `loadMissing`, exactly as if none of them were cached; the batch-read failure itself never surfaces to the caller.
 - **EvictByKey failures** — if a backend `Delete` call fails, the error is returned to the caller so it can retry or alert.
+- **EvictByKeyPrefix failures** — a prefix that contains `*` returns `ErrWildcardKeyPrefix` before anything is deleted. If the store fails partway through, `EvictByKeyPrefix` returns the count removed so far together with the joined error, so the call can be repeated. On `redisstore`, a failed `DEL` does not stop the sweep (the remaining keys are still deleted), and an error from the key scan is joined into the result. For an alias-group cache on `redisstore`, an error from the key scan aborts the call before any record is evicted (count `0`); a failure while evicting one record is joined and the other records are still evicted. Entries that a failed call left behind expire when their TTL backstop elapses.
 - **Value-derived method failures** — when using `Put(ctx, writer)`, `PutValue(ctx, val)`, or `Evict(ctx, val)`, if `T` does not implement `UniqueKeyed`, these methods return `ErrNotUniqueKeyed`.
 - **TTL backstop** — the TTL bounds how long any missed or failed eviction can leave a stale value in the cache.
 
@@ -268,6 +269,48 @@ if err := users.EvictByKey(ctx, "u_123"); err != nil {
 `PutByKey`/`PutValueByKey`, so the next `GetByKey` for that key is a clean read-through instead of serving stale data.
 `EvictManyByKey` does the same for several keys at once, joining any errors.
 
+### `EvictByKeyPrefix` — bulk delete by key prefix
+
+```go
+// Erase everything cached for one tenant. The cache keys were built as "<appID>::<id>",
+// so every entry of tenant "app-123" starts with "app-123::".
+removed, err := users.EvictByKeyPrefix(ctx, "app-123::")
+switch {
+case errors.Is(err, smartcache.ErrEmptyKeyPrefix):
+	// An empty prefix would match every entry, so it is rejected instead of flushing the cache.
+case errors.Is(err, smartcache.ErrWildcardKeyPrefix):
+	// The prefix contains '*', which is never allowed.
+case errors.Is(err, smartcache.ErrPrefixEvictNotSupported):
+	// The store (or the Redis connection behind it) cannot prefix-delete.
+case err != nil:
+	// The store failed partway; removed is the count deleted before the failure.
+	// Repeat the call, or let the TTL backstop expire what is left.
+}
+fmt.Println("evicted", removed, "entries")
+```
+
+`EvictByKeyPrefix` deletes every entry of this cache whose logical key (the key you pass to `GetByKey`/`PutByKey`)
+starts with `keyPrefix`, and returns how many it removed. Cached "not found" markers under a matching key are removed too.
+The prefix is **literal**: a prefix that contains `*` is rejected with `ErrWildcardKeyPrefix`, so a caller can never ask for a pattern, and `?`, `[`, `]` and `\` match themselves. End the prefix with your own
+separator (as `"app-123::"` does) so that `"app-12"` can never match `"app-123"`'s entries. Four outcomes are errors
+you can test with `errors.Is`: an empty prefix returns `ErrEmptyKeyPrefix`, a prefix that contains `*` returns `ErrWildcardKeyPrefix`, a store without the capability returns
+`ErrPrefixEvictNotSupported`, and a partial failure returns the count removed so far with the joined error (see
+[Failure Semantics](#failure-semantics)).
+
+On an **alias-group** cache the prefix is matched against the **primary key** (the value of `CacheUniqueKey()`), and the
+returned count is the number of *records* removed. Each matching record is removed together with its members hash and
+all of its alias pointers, exactly as `EvictByAlias` or a primary-key evict removes one record. A record whose value
+has already expired but whose members hash is still present is cleaned up too.
+
+> **Not for the request hot path.** On Redis, `EvictByKeyPrefix` walks the keyspace with `SCAN` (never `KEYS`, so it
+> does not block the server) and issues one `DEL` per key (so Redis Cluster never receives a cross-slot command). Cost
+> grows with the number of keys in Redis, not only with the number of matches. Use it for rare bulk operations such
+> as erasing one tenant, never per request.
+
+`memstore` supports `EvictByKeyPrefix` out of the box. `redisstore` supports it when the connection passed to
+`redisstore.New` also implements `redisstore.KeyScanner` (see [Implementation Notes](#redisstorekeyscanner--scanning-keys-for-prefix-eviction)).
+With a connection that cannot scan keys, `EvictByKeyPrefix` returns `ErrPrefixEvictNotSupported`.
+
 ### Key-taking vs value-derived methods
 
 smartcache offers two parallel method families, distinguished by how they derive the cache key:
@@ -276,6 +319,7 @@ smartcache offers two parallel method families, distinguished by how they derive
 - `GetByKey(ctx, key, loader)`, `GetManyByKey(ctx, keys, loadMissing)` — read-through by explicit key
 - `PutByKey(ctx, key, writer)`, `PutValueByKey(ctx, key, val)` — write-through by explicit key
 - `EvictByKey(ctx, key)`, `EvictManyByKey(ctx, keys)` — delete by explicit key
+- `EvictByKeyPrefix(ctx, keyPrefix)` — delete every entry whose key starts with `keyPrefix`; returns the number removed
 
 These work for **any** `T`, including slice types, and do not require `T` to implement any interface.
 
@@ -452,6 +496,8 @@ the cache's registered name — so cardinality stays bounded regardless of traff
 process exit to flush the final batch; it is a no-op when `WithOTLP` was never configured, so callers that don't
 need metrics pay no lifecycle cost.
 
+The `.evict` counter counts evictions requested or performed: `EvictByKey` adds 1, `EvictManyByKey` adds the number of keys it was given, and `EvictByKeyPrefix` adds the number of entries it removed (keys for a plain cache, records for an alias group). `EvictByKeyPrefix` adds nothing when it removes none, including when it returns an error before removing anything.
+
 ## Configuration
 
 Every option is set at one of two levels: on the **manager** (a default inherited by every cache it builds), or
@@ -553,6 +599,18 @@ implementation to `smartcache.NewManager(store, ...)` in place of `memstore.New(
 
 Optionally, also implement `BatchCacheStore` (embeds `CacheStore` and adds one `GetMany(ctx, keys) (map[string][]byte, error)` method) so `Cache[T].GetManyByKey` can read several keys in a single round trip instead of falling back to one `GetByKey` call per key. `redisstore` implements it via Redis `MGET`; `memstore` implements it with an in-process loop.
 
+Optionally, also implement `PrefixCacheStore` (embeds `CacheStore` and adds one `DeleteByPrefix(ctx, keyPrefix) (int64, error)` method) so `Cache[T].EvictByKeyPrefix` works on plain (non-alias) caches:
+
+```go
+type PrefixCacheStore interface {
+	CacheStore
+	// DeleteByPrefix removes every key that starts with keyPrefix and returns how many it removed.
+	DeleteByPrefix(ctx context.Context, keyPrefix string) (int64, error)
+}
+```
+
+`keyPrefix` is a complete, literal storage-key prefix that `Cache[T]` builds for you; a store must treat every character in it literally, never as a glob. `Register` detects the interface with a type assertion, the same way it detects `BatchCacheStore`; on a store that does not implement it, `EvictByKeyPrefix` returns `ErrPrefixEvictNotSupported`. `memstore` implements it with an in-process scan. `redisstore` implements it with `SCAN` and one `DEL` per key, and needs its connection to implement `redisstore.KeyScanner` (see below).
+
 ### `AliasCacheStore` — backing `RegisterAliasGroup`
 
 To back an alias-group cache (see [`RegisterAliasGroup`](#registeraliasgroup--one-value-many-lookup-keys)) with your own
@@ -597,6 +655,42 @@ behavior). The mode is chosen per cache via `EntityOptions.AliasMode` (`nil` def
 is fixed for the cache's lifetime. See [`docs/1-alias-cache-design.md`](./docs/1-alias-cache-design.md) for the
 full design, including the trade-offs between the two modes.
 
+Optionally, the `AliasOps` that `AliasGroup` returns can also implement `PrefixAliasOps` (embeds `AliasOps` and adds one method) so `Cache[T].EvictByKeyPrefix` works on alias-group caches:
+
+```go
+type PrefixAliasOps interface {
+	AliasOps
+	// EvictByPrimaryPrefix removes every record whose primary key starts with primaryPrefix and
+	// cascades to its members hash and alias pointers exactly as EvictByPrimary does for one record.
+	// primaryPrefix is literal. It returns the number of records removed.
+	EvictByPrimaryPrefix(ctx context.Context, primaryPrefix string) (int64, error)
+}
+```
+
+`RegisterAliasGroup` detects it with a type assertion on the `AliasOps` handle, so an alias-group cache whose handle lacks it returns `ErrPrefixEvictNotSupported` from `EvictByKeyPrefix`. `memstore` and both `redisstore` modes (`AliasColocated` and `AliasSharded`) implement it.
+
+### `redisstore.KeyScanner` — scanning keys for prefix eviction
+
+`redisstore` finds the keys to delete with `SCAN`. `RedisConn` is **unchanged**: it still has the same six methods, so every existing `RedisConn` implementation keeps compiling and working. Prefix eviction needs one more capability, expressed as a separate optional interface that the connection may implement:
+
+```go
+type KeyScanner interface {
+	// ScanKeys calls fn with batches of every key that matches the Redis glob pattern match,
+	// visiting every node of a cluster. fn is never called concurrently. ScanKeys stops and
+	// returns the first error fn returns.
+	ScanKeys(ctx context.Context, match string, fn func(keys []string) error) error
+}
+```
+
+`redisstore` checks for `KeyScanner` when `EvictByKeyPrefix` is called, not when the cache is registered. A connection that does not implement it makes `EvictByKeyPrefix` return `ErrPrefixEvictNotSupported`; nothing else changes. The contract an implementation must keep:
+
+- The keys that `ScanKeys` passes to `fn` are in the **same key space** as the other `RedisConn` methods accept. A connection that adds its own key prefix (for example an environment prefix) to every key must apply that prefix to the `match` pattern and strip it from the keys it passes to `fn`.
+- `ScanKeys` must not call `fn` concurrently, and must stop and return the first error `fn` returns.
+
+One helper does the scanning for a `KeyScanner` implementation:
+
+- `redisstore.ScanAll(ctx, client redis.UniversalClient, match string, fn func(keys []string) error) error` is the cluster-aware `SCAN` loop itself, for wrappers that implement `KeyScanner` around their own prefixing: scan with your own prefixed pattern and strip the prefix inside `fn`. A `*redis.ClusterClient` is scanned on every master node; any other client is scanned once. `ScanAll` serializes calls to `fn`, and the first error `fn` returns stops the scan on every node.
+
 ### Custom serialization (`Codec`)
 
 By default `Cache[T]` serializes values as JSON. To use a different encoding — for speed, a compact binary
@@ -635,7 +729,7 @@ was served. `GetByKey`/`GetManyByKey` use the read-side values; `PutByKey` uses 
 | `Written` | `PutByKey` | The writer ran and the value it returned was cached. |
 | `WrittenNotCached` | `PutByKey` | The writer ran, but the backend `Set` failed; the value is still returned, uncached. |
 
-`PutValueByKey`, `Put`, `PutValue`, `EvictByKey`, and `EvictManyByKey` return only an `error` — they have no `Outcome`.
+`PutValueByKey`, `Put`, `PutValue`, `EvictByKey`, and `EvictManyByKey` return only an `error` — they have no `Outcome`. `EvictByKeyPrefix` returns `(int64, error)`: the number of entries removed and an error — it has no `Outcome` either.
 
 ## Error reference
 
@@ -655,6 +749,9 @@ only ones that **panic** (programming errors caught at construction) rather than
 | `ErrNilStore` | `NewManager` (returned) | The `CacheStore` passed to `NewManager` is nil. |
 | `ErrAliasingNotSupported` | `RegisterAliasGroup` (**panics**) | The injected `CacheStore` doesn't support alias groups. |
 | `ErrNotAliasGroup` | `GetByAlias` / `PutAliased` / `PutAliasedValue` / `EvictByAlias` (returned) | Called on a cache built with `Register` instead of `RegisterAliasGroup`. |
+| `ErrEmptyKeyPrefix` | `EvictByKeyPrefix` (returned) | The `keyPrefix` is empty. An empty prefix would match every entry of the cache, so it is rejected instead of flushing it. |
+| `ErrWildcardKeyPrefix` | `EvictByKeyPrefix` (returned) | The `keyPrefix` contains the wildcard `*`. A prefix is always literal, so `*` is rejected before anything is deleted. |
+| `ErrPrefixEvictNotSupported` | `EvictByKeyPrefix` (returned) | The manager's store does not implement `PrefixCacheStore` (or, for an alias-group cache, its `AliasOps` does not implement `PrefixAliasOps`), or the `redisstore` connection does not implement `redisstore.KeyScanner`. |
 | `ErrStoreMiss` | `CacheStore.Get` (backend contract) | The key is absent. A backend's `Get` returns it and `Cache[T]` treats it as a miss; it is never surfaced to callers. Relevant only when writing a custom backend. |
 
 ## License

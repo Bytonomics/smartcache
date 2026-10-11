@@ -31,7 +31,10 @@ type colocatedOps struct {
 	ns   string
 }
 
-var _ smartcache.AliasOps = (*colocatedOps)(nil)
+var (
+	_ smartcache.AliasOps       = (*colocatedOps)(nil)
+	_ smartcache.PrefixAliasOps = (*colocatedOps)(nil)
+)
 
 func (o *colocatedOps) GetValue(ctx context.Context, primary string) ([]byte, error) {
 	b, err := o.conn.Get(ctx, keyspace.ValueKey(o.ns, primary, false)).Bytes()
@@ -87,4 +90,10 @@ func (o *colocatedOps) EvictByAlias(ctx context.Context, ref smartcache.AliasRef
 	return o.conn.Eval(ctx, colocatedEvictByAliasScript,
 		[]string{keyspace.PointerKey(o.ns, ref.Field, ref.Value, false)},
 		keyspace.ColocatedValuePrefix(o.ns), keyspace.ColocatedMembersPrefix(o.ns), keyspace.ColocatedGrpPrefix(o.ns)).Err()
+}
+
+// EvictByPrimaryPrefix evicts every record whose primary key starts with primaryPrefix, one
+// EvictByPrimary per record. It returns the number of records evicted.
+func (o *colocatedOps) EvictByPrimaryPrefix(ctx context.Context, primaryPrefix string) (int64, error) {
+	return evictByPrimaryPrefix(ctx, o.conn, o.ns, false, primaryPrefix, o.EvictByPrimary)
 }

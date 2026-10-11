@@ -229,3 +229,159 @@ func TestGetMany_ReturnsFoundOmitsMissing(t *testing.T) {
 		t.Error("absent key b must be omitted from the result")
 	}
 }
+
+// prefixStoreFor returns s viewed as a smartcache.PrefixCacheStore, failing the test if it is not one.
+func prefixStoreFor(t *testing.T, s smartcache.CacheStore) smartcache.PrefixCacheStore {
+	t.Helper()
+	pc, ok := s.(smartcache.PrefixCacheStore)
+	if !ok {
+		t.Fatal("memstore must implement smartcache.PrefixCacheStore")
+	}
+	return pc
+}
+
+// TestDeleteByPrefix_RemovesOnlyMatching verifies that DeleteByPrefix removes exactly the entries
+// whose key starts with the literal prefix and reports how many it removed.
+func TestDeleteByPrefix_RemovesOnlyMatching(t *testing.T) {
+	cases := []struct {
+		name      string
+		keys      []string
+		prefix    string
+		wantCount int64
+		wantGone  []string
+		wantKept  []string
+	}{
+		{
+			name:      "matching subset is removed and counted",
+			keys:      []string{"app-1::a", "app-1::b", "app-2::a"},
+			prefix:    "app-1::",
+			wantCount: 2,
+			wantGone:  []string{"app-1::a", "app-1::b"},
+			wantKept:  []string{"app-2::a"},
+		},
+		{
+			name:      "empty store returns zero",
+			prefix:    "app-1::",
+			wantCount: 0,
+		},
+		{
+			name:      "no key matches leaves the store untouched",
+			keys:      []string{"k1", "k2"},
+			prefix:    "zz",
+			wantCount: 0,
+			wantKept:  []string{"k1", "k2"},
+		},
+		{
+			name:      "prefix must match at the start, not as a substring",
+			keys:      []string{"xapp-1::a"},
+			prefix:    "app-1::",
+			wantCount: 0,
+			wantKept:  []string{"xapp-1::a"},
+		},
+		{
+			name:      "star is literal, not a glob",
+			keys:      []string{"a*1", "axb"},
+			prefix:    "a*",
+			wantCount: 1,
+			wantGone:  []string{"a*1"},
+			wantKept:  []string{"axb"},
+		},
+		{
+			name:      "question mark is literal, not a glob",
+			keys:      []string{"a?1", "axb"},
+			prefix:    "a?",
+			wantCount: 1,
+			wantGone:  []string{"a?1"},
+			wantKept:  []string{"axb"},
+		},
+		{
+			name:      "bracket is literal, not a character class",
+			keys:      []string{"a[1", "a1"},
+			prefix:    "a[",
+			wantCount: 1,
+			wantGone:  []string{"a[1"},
+			wantKept:  []string{"a1"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := memstore.New()
+			pc := prefixStoreFor(t, s)
+			for _, k := range tc.keys {
+				if err := s.Set(ctx, k, []byte("v"), time.Minute); err != nil {
+					t.Fatalf("Set %q: %v", k, err)
+				}
+			}
+
+			got, err := pc.DeleteByPrefix(ctx, tc.prefix)
+			if err != nil {
+				t.Fatalf("DeleteByPrefix: %v", err)
+			}
+			if got != tc.wantCount {
+				t.Errorf("count: want %d, got %d", tc.wantCount, got)
+			}
+			for _, k := range tc.wantGone {
+				if _, err := s.Get(ctx, k); !errors.Is(err, smartcache.ErrStoreMiss) {
+					t.Errorf("key %q must be removed, got err=%v", k, err)
+				}
+			}
+			for _, k := range tc.wantKept {
+				if _, err := s.Get(ctx, k); err != nil {
+					t.Errorf("key %q must survive, got err=%v", k, err)
+				}
+			}
+		})
+	}
+}
+
+// TestDeleteByPrefix_ExpiredMatchingEntryNotCounted verifies that an expired entry under the prefix
+// is not counted, while a live entry under the prefix is counted and removed.
+func TestDeleteByPrefix_ExpiredMatchingEntryNotCounted(t *testing.T) {
+	ctx := context.Background()
+	s := memstore.New()
+	pc := prefixStoreFor(t, s)
+
+	if err := s.Set(ctx, "p:live", []byte("v"), time.Minute); err != nil {
+		t.Fatalf("Set live: %v", err)
+	}
+	if err := s.Set(ctx, "p:dead", []byte("v"), 30*time.Millisecond); err != nil {
+		t.Fatalf("Set dead: %v", err)
+	}
+	time.Sleep(80 * time.Millisecond)
+
+	got, err := pc.DeleteByPrefix(ctx, "p:")
+	if err != nil {
+		t.Fatalf("DeleteByPrefix: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("want 1 (expired entry must not be counted), got %d", got)
+	}
+	if _, err := s.Get(ctx, "p:live"); !errors.Is(err, smartcache.ErrStoreMiss) {
+		t.Errorf("live matching key must be removed, got err=%v", err)
+	}
+}
+
+// TestDeleteByPrefix_ConcurrentWithSet verifies concurrent Set and DeleteByPrefix are safe (no panics
+// or data races under -race).
+func TestDeleteByPrefix_ConcurrentWithSet(t *testing.T) {
+	ctx := context.Background()
+	s := memstore.New()
+	pc := prefixStoreFor(t, s)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			key := fmt.Sprintf("app-%d::k%d", i%3, i%5)
+			if err := s.Set(ctx, key, []byte("v"), time.Minute); err != nil {
+				t.Errorf("Set: unexpected error %v", err)
+			}
+			if _, err := pc.DeleteByPrefix(ctx, "app-1::"); err != nil {
+				t.Errorf("DeleteByPrefix: unexpected error %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+}

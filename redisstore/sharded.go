@@ -33,7 +33,10 @@ type shardedOps struct {
 	ns   string
 }
 
-var _ smartcache.AliasOps = (*shardedOps)(nil)
+var (
+	_ smartcache.AliasOps       = (*shardedOps)(nil)
+	_ smartcache.PrefixAliasOps = (*shardedOps)(nil)
+)
 
 func (o *shardedOps) GetValue(ctx context.Context, primary string) ([]byte, error) {
 	b, err := o.conn.Get(ctx, keyspace.ValueKey(o.ns, primary, true)).Bytes()
@@ -109,4 +112,10 @@ func (o *shardedOps) EvictByAlias(ctx context.Context, ref smartcache.AliasRef) 
 		return err
 	}
 	return o.EvictByPrimary(ctx, pk)
+}
+
+// EvictByPrimaryPrefix evicts every record whose primary key starts with primaryPrefix, one
+// EvictByPrimary per record. It returns the number of records evicted.
+func (o *shardedOps) EvictByPrimaryPrefix(ctx context.Context, primaryPrefix string) (int64, error) {
+	return evictByPrimaryPrefix(ctx, o.conn, o.ns, true, primaryPrefix, o.EvictByPrimary)
 }

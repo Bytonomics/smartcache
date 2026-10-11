@@ -205,14 +205,19 @@ func Register[T any](m *Manager, name string, opts *EntityOptions) (*Cache[T], e
 	if bs, ok := m.store.(BatchCacheStore); ok {
 		batch = bs
 	}
+	var prefixStore PrefixCacheStore
+	if ps, ok := m.store.(PrefixCacheStore); ok {
+		prefixStore = ps
+	}
 	var group *singleflight.Group
 	if !disableSF {
 		group = &singleflight.Group{}
 	}
 
 	c := &Cache[T]{
-		store: m.store,
-		batch: batch,
+		store:       m.store,
+		batch:       batch,
+		prefixStore: prefixStore,
 		opts: Options{
 			Prefix:              prefix,
 			TTL:                 ttl,
@@ -256,6 +261,9 @@ func RegisterAliasGroup[T any](m *Manager, name string, opts *EntityOptions) (*C
 		return nil, err
 	}
 	c.aliasOps = aliasStore.AliasGroup(c.opts.Prefix, mode)
+	if pa, ok := c.aliasOps.(PrefixAliasOps); ok {
+		c.prefixAlias = pa
+	}
 	c.isAliasGroup = true
 	return c, nil
 }

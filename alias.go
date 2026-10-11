@@ -51,6 +51,17 @@ type AliasOps interface {
 	EvictByAlias(ctx context.Context, ref AliasRef) error
 }
 
+// PrefixAliasOps is an optional extension of AliasOps for alias-group backends that can evict every
+// record whose primary key starts with a prefix. Detected by a comma-ok assertion on the AliasOps
+// returned by AliasCacheStore.AliasGroup.
+type PrefixAliasOps interface {
+	AliasOps
+	// EvictByPrimaryPrefix removes every record whose primary key starts with primaryPrefix and
+	// cascades to its members hash and alias pointers exactly as EvictByPrimary does for one record.
+	// primaryPrefix is literal. It returns the number of records removed.
+	EvictByPrimaryPrefix(ctx context.Context, primaryPrefix string) (int64, error)
+}
+
 // AliasCacheStore is the optional CacheStore extension for backends that support alias groups. It
 // is a FACTORY: given an entity namespace and slot mode it returns an AliasOps bound to them.
 // RegisterAliasGroup calls AliasGroup once per cache. redisstore returns a Colocated or Sharded
