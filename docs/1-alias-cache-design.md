@@ -7,7 +7,7 @@ title: "smartcache — Alias-Based Multi-Key Caching (Architecture Design)"
 
 **Status:** Design approved — ready for implementation spec.
 **Audience:** engineers building or maintaining `smartcache`.
-**Module:** `github.com/Bytonomics/smartcache` (`smritea-oss/modules/golang/smartcache`).
+**Module:** `github.com/Bytonomics/smartcache`.
 
 This document is written as a cascade: it states a problem, gives the solution, then
 states the **next** problem that solution creates, and solves that in turn — until the
@@ -147,7 +147,7 @@ unsafe). Given the no-leak requirement, it is required.
 
 ## 4. Problem — this must be correct across many server instances
 
-The control-plane / data-plane deployment runs **many instances** of a service, possibly on
+A multi-instance deployment runs **many instances** of a service, possibly on
 different continents, sharing one Redis. If instance A evicts a record through the id, and
 instance B later reads it through the email, B must see the eviction. In-memory state on A
 is invisible to B.
